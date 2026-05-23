@@ -30,6 +30,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -110,6 +111,28 @@ namespace
       --e;
 
     return s.substr(b, e - b);
+  }
+
+  bool IsTruthyEnvValue(const char *value)
+  {
+    if (value == nullptr)
+      return false;
+
+    std::string lower = Trim(value);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c)
+                   { return static_cast<char>(std::tolower(c)); });
+
+    return lower == "1" ||
+           lower == "true" ||
+           lower == "yes" ||
+           lower == "on" ||
+           lower == "y";
+  }
+
+  bool IsEnvFlagEnabled(const char *name)
+  {
+    return IsTruthyEnvValue(std::getenv(name));
   }
 
   std::vector<std::string> SplitFlexible(const std::string &line)
@@ -1231,6 +1254,8 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
                                  0.5 * fPatchXY,
                                  0.5 * fPatchXY,
                                  0.5 * localThickness);
+  const bool checkOverlaps = IsEnvFlagEnabled("BNZS_CHECK_OVERLAPS");
+  const bool geometryVerbose = IsEnvFlagEnabled("BNZS_GEOMETRY_VERBOSE");
 
   G4int copyBN = 0;
   for (const auto &pos : fPlacedBNCenters)
@@ -1264,7 +1289,7 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
 
       new G4PVPlacement(
           nullptr, pos, clippedLV, pvName,
-          fMatrixLogical, false, copyBN++, true);
+          fMatrixLogical, false, copyBN++, checkOverlaps);
 
       insideBNVolume += clipVol;
       ++clippedBNCount;
@@ -1272,13 +1297,16 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
       if (minClippedBNVolume < 0.0 || clipVol < minClippedBNVolume)
         minClippedBNVolume = clipVol;
 
-      G4cout
-          << "[Clip BN] center = ("
-          << pos.x() / um << ", "
-          << pos.y() / um << ", "
-          << pos.z() / um << ") um"
-          << "  volume = " << clipVol / volumeUnit_um3 << " um^3"
-          << G4endl;
+      if (geometryVerbose)
+      {
+        G4cout
+            << "[Clip BN] center = ("
+            << pos.x() / um << ", "
+            << pos.y() / um << ", "
+            << pos.z() / um << ") um"
+            << "  volume = " << clipVol / volumeUnit_um3 << " um^3"
+            << G4endl;
+      }
     }
   }
 
@@ -1314,7 +1342,7 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
 
       new G4PVPlacement(
           nullptr, pos, clippedLV, pvName,
-          fMatrixLogical, false, copyZnS++, true);
+          fMatrixLogical, false, copyZnS++, checkOverlaps);
 
       insideZnSVolume += clipVol;
       ++clippedZnSCount;
@@ -1322,13 +1350,16 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
       if (minClippedZnSVolume < 0.0 || clipVol < minClippedZnSVolume)
         minClippedZnSVolume = clipVol;
 
-      G4cout
-          << "[Clip ZnS] center = ("
-          << pos.x() / um << ", "
-          << pos.y() / um << ", "
-          << pos.z() / um << ") um"
-          << "  volume = " << clipVol / volumeUnit_um3 << " um^3"
-          << G4endl;
+      if (geometryVerbose)
+      {
+        G4cout
+            << "[Clip ZnS] center = ("
+            << pos.x() / um << ", "
+            << pos.y() / um << ", "
+            << pos.z() / um << ") um"
+            << "  volume = " << clipVol / volumeUnit_um3 << " um^3"
+            << G4endl;
+      }
     }
   }
 

@@ -628,6 +628,7 @@ python3 stageB_balanced_cycle.py \
 - `--keep-part-outputs`：保留分块输出，不只保留合并后的正式文件
 - `--merge-only`：只合并已有分块，不重新运行 Geant4
 - `--dry-run`：打印将执行的运行配置，不真正调用 `Geant4-MicroLight-BNZS`
+- `--group-by-placement`：把同一 placement 负责的多个厚度分块放进一个临时输入目录，只启动一次 Geant4
 
 常用环境变量：
 
@@ -637,6 +638,10 @@ python3 stageB_balanced_cycle.py \
   对同一物理俘获点做两次 alpha/Li 条件 trajectory 采样
 - `STAGEB_THICKNESSES=30,40,...`
   只处理指定厚度的 capture CSV
+- `BNZS_CHECK_OVERLAPS=1`
+  为 clipped BN/ZnS placement 开启 Geant4 overlap check；默认关闭以减少 RVE 初始化开销
+- `BNZS_GEOMETRY_VERBOSE=1`
+  打印逐个 `[Clip BN]` / `[Clip ZnS]` 明细；默认只输出几何 summary
 
 推荐的生产运行示例：
 
@@ -659,6 +664,12 @@ bash batch_run.sh 1-2
 
 ```text
 beamOn = capture records in chunk × BNZS_ALPHALI_REPLAY_PER_CAPTURE
+```
+
+如果启用 `--group-by-placement`，则会变为：
+
+```text
+beamOn = capture records in one placement directory × BNZS_ALPHALI_REPLAY_PER_CAPTURE
 ```
 
 ### 2. 用新的 Stage B 输出重建 Stage C 源表

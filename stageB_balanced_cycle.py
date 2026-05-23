@@ -42,6 +42,14 @@ def parse_args():
     parser.add_argument("--keep-part-outputs", action="store_true")
     parser.add_argument("--merge-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--group-by-placement",
+        action="store_true",
+        help=(
+            "Batch all selected thickness chunks for a placement into one Geant4 run "
+            "instead of launching one run per thickness x placement chunk."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -127,6 +135,124 @@ def write_chunk(path, header, rows):
         writer.writerows(rows)
 
 
+def build_stageb_env(base_env, build_dir, project_root, bn_wt, zns_wt, ratio, placement_file):
+    env = base_env.copy()
+    env["BNZS_RUN_MODE"] = "StageB_ReplayAlphaLi"
+    env.pop("BNZS_INPUT_CSV", None)
+    env.pop("BNZS_INPUT_DIR", None)
+    env["BNZS_BN_WT"] = bn_wt
+    env["BNZS_ZNS_WT"] = zns_wt
+    env["BNZS_OUTPUT_RATIO"] = ratio
+    env["BNZS_PLACEMENT_FILE"] = relative_to_dir(placement_file, project_root)
+    if "BNZS_STAGEB_OUTPUT_MODE" in base_env:
+        env["BNZS_STAGEB_OUTPUT_MODE"] = base_env["BNZS_STAGEB_OUTPUT_MODE"]
+    if "BNZS_ALPHALI_REPLAY_PER_CAPTURE" in base_env:
+        env["BNZS_ALPHALI_REPLAY_PER_CAPTURE"] = base_env["BNZS_ALPHALI_REPLAY_PER_CAPTURE"]
+    return env
+
+
+def replay_per_capture_from_env(env):
+    return int(env.get("BNZS_ALPHALI_REPLAY_PER_CAPTURE", "1"))
+
+
+def collect_ratio_capture_assignments(
+    ratio,
+    capture_files,
+    placement_files,
+    min_thickness_um,
+    replay_multiplier,
+    seed,
+):
+    assignments = []
+
+    for capture_file in capture_files:
+        header, rows = read_capture_rows(capture_file, min_thickness_um)
+        if not rows:
+            assignments.append(
+                {
+                    "capture_file": capture_file,
+                    "source_tag": capture_file.name.replace(
+                        "_neutron_capture_positions.csv", ""
+                    ),
+                    "header": header,
+                    "rows": [],
+                    "replays": [],
+                }
+            )
+            continue
+
+        source_tag = capture_file.name.replace("_neutron_capture_positions.csv", "")
+        shuffled = list(rows)
+        rng = random.Random(stable_seed(seed, ratio, capture_file.name))
+        rng.shuffle(shuffled)
+
+        placements = list(placement_files)
+        rng.shuffle(placements)
+
+        replay_assignments = []
+        for replay_idx in range(replay_multiplier):
+            chunks = [[] for _ in placements]
+            for idx, row in enumerate(shuffled):
+                # A replay round shifts each record to a different placement
+                # while preserving near-equal chunk sizes.
+                chunks[(idx + replay_idx) % len(placements)].append(row)
+
+            replay_assignments.append(
+                {
+                    "replay_idx": replay_idx,
+                    "placements": placements,
+                    "chunks": chunks,
+                }
+            )
+
+        assignments.append(
+            {
+                "capture_file": capture_file,
+                "source_tag": source_tag,
+                "header": header,
+                "rows": rows,
+                "replays": replay_assignments,
+            }
+        )
+
+    return assignments
+
+
+def merge_ratio_outputs(project_root, ratio, source_tags, keep_part_outputs):
+    output_ratio_dir = project_root / "Output" / "stageB" / ratio
+
+    for source_tag in source_tags:
+        merged_results = [
+            merge_step_outputs(
+                output_ratio_dir,
+                source_tag,
+                remove_parts=not keep_part_outputs,
+            ),
+            merge_capture_anchor_outputs(
+                output_ratio_dir,
+                source_tag,
+                remove_parts=not keep_part_outputs,
+            ),
+            merge_zns_track_outputs(
+                output_ratio_dir,
+                source_tag,
+                remove_parts=not keep_part_outputs,
+            ),
+            merge_boundary_summary_outputs(
+                output_ratio_dir,
+                source_tag,
+                remove_parts=not keep_part_outputs,
+            ),
+        ]
+        for rows_merged, merged_path in merged_results:
+            if merged_path is None:
+                continue
+            print(
+                f">>> Merged {ratio} {source_tag}: "
+                f"rows={rows_merged} -> {merged_path.name}"
+            )
+
+
 def ratio_parts(ratio):
     if "-" not in ratio:
         raise ValueError(f"Invalid ratio folder name: {ratio}")
@@ -167,6 +293,7 @@ def run_one(build_dir, executable, macro, env, log_file, dry_run):
     if dry_run:
         print("DRY RUN:", " ".join(cmd))
         print("  BNZS_INPUT_CSV=", env.get("BNZS_INPUT_CSV"))
+        print("  BNZS_INPUT_DIR=", env.get("BNZS_INPUT_DIR"))
         print("  BNZS_PLACEMENT_FILE=", env.get("BNZS_PLACEMENT_FILE"))
         print("  BNZS_STAGEB_OUTPUT_MODE=", env.get("BNZS_STAGEB_OUTPUT_MODE"))
         print("  BNZS_ALPHALI_REPLAY_PER_CAPTURE=", env.get("BNZS_ALPHALI_REPLAY_PER_CAPTURE"))
@@ -453,6 +580,218 @@ def merge_existing_outputs(project_root, ratios, remove_parts, dry_run=False):
         print("No Stage B part outputs found to merge.")
 
 
+def run_grouped_by_chunk(
+    args,
+    project_root,
+    build_dir,
+    executable,
+    macro,
+    chunk_root,
+    log_root,
+    ratio,
+    bn_wt,
+    zns_wt,
+    assignments,
+):
+    total_runs = 0
+    failed_runs = 0
+    source_tags = []
+
+    for assignment in assignments:
+        source_tag = assignment["source_tag"]
+        source_tags.append(source_tag)
+        if not assignment["rows"]:
+            print(f">>> Skip {ratio}/{assignment['capture_file'].name}: no compatible records")
+            continue
+
+        for replay in assignment["replays"]:
+            replay_idx = replay["replay_idx"]
+            placements = replay["placements"]
+            chunks = replay["chunks"]
+
+            for placement_idx, (placement_file, chunk_rows) in enumerate(zip(placements, chunks)):
+                if not chunk_rows:
+                    continue
+
+                placement_tag = placement_file.stem
+                chunk_name = (
+                    f"{source_tag}_m{replay_idx + 1:02d}_"
+                    f"p{placement_idx + 1:04d}_{placement_tag}_"
+                    "neutron_capture_positions.csv"
+                )
+                chunk_path = (
+                    chunk_root / ratio / source_tag / f"m{replay_idx + 1:02d}" / chunk_name
+                )
+                write_chunk(chunk_path, assignment["header"], chunk_rows)
+
+                log_file = (
+                    log_root
+                    / ratio
+                    / source_tag
+                    / f"m{replay_idx + 1:02d}"
+                    / f"p{placement_idx + 1:04d}_{placement_tag}.log"
+                )
+
+                env = build_stageb_env(
+                    os.environ,
+                    build_dir,
+                    project_root,
+                    bn_wt,
+                    zns_wt,
+                    ratio,
+                    placement_file,
+                )
+                env["BNZS_INPUT_CSV"] = relative_to_dir(chunk_path, build_dir)
+
+                replay_per_capture = replay_per_capture_from_env(env)
+                beam_on_count = len(chunk_rows) * replay_per_capture
+                macro_to_run = make_beamon_macro(build_dir, macro, beam_on_count)
+
+                total_runs += 1
+                print(
+                    f">>> {ratio} {source_tag} m{replay_idx + 1:02d} "
+                    f"placement {placement_idx + 1}/{len(placements)} "
+                    f"events={len(chunk_rows)} beamOn={beam_on_count} placement={placement_tag}"
+                )
+
+                try:
+                    code = run_one(build_dir, executable, macro_to_run, env, log_file, args.dry_run)
+                finally:
+                    macro_to_run.unlink(missing_ok=True)
+                if code != 0:
+                    failed_runs += 1
+                    print(f"!!! Failed code={code}: {log_file}")
+                    raise SystemExit(code)
+
+    merge_ratio_outputs(project_root, ratio, source_tags, args.keep_part_outputs)
+    return total_runs, failed_runs
+
+
+def run_grouped_by_placement(
+    args,
+    project_root,
+    build_dir,
+    executable,
+    macro,
+    chunk_root,
+    log_root,
+    ratio,
+    bn_wt,
+    zns_wt,
+    placement_files,
+    assignments,
+):
+    total_runs = 0
+    failed_runs = 0
+    source_tags = [assignment["source_tag"] for assignment in assignments]
+
+    placement_jobs = {}
+    placement_index_lookup = {path.resolve(): idx for idx, path in enumerate(placement_files)}
+
+    for assignment in assignments:
+        if not assignment["rows"]:
+            print(f">>> Skip {ratio}/{assignment['capture_file'].name}: no compatible records")
+            continue
+
+        source_tag = assignment["source_tag"]
+        for replay in assignment["replays"]:
+            replay_idx = replay["replay_idx"]
+            for placement_file, chunk_rows in zip(replay["placements"], replay["chunks"]):
+                if not chunk_rows:
+                    continue
+
+                placement_key = placement_file.resolve()
+                placement_tag = placement_file.stem
+                placement_pos = placement_index_lookup[placement_key] + 1
+                placement_job = placement_jobs.setdefault(
+                    placement_key,
+                    {
+                        "placement_file": placement_file,
+                        "placement_tag": placement_tag,
+                        "placement_pos": placement_pos,
+                        "parts": [],
+                        "event_count": 0,
+                    },
+                )
+
+                chunk_name = (
+                    f"{source_tag}_m{replay_idx + 1:02d}_"
+                    f"p{placement_pos:04d}_{placement_tag}_"
+                    "neutron_capture_positions.csv"
+                )
+                chunk_path = (
+                    chunk_root
+                    / ratio
+                    / f"placement_{placement_pos:04d}_{placement_tag}"
+                    / chunk_name
+                )
+                write_chunk(chunk_path, assignment["header"], chunk_rows)
+
+                placement_job["parts"].append(
+                    {
+                        "source_tag": source_tag,
+                        "chunk_path": chunk_path,
+                        "chunk_name": chunk_name,
+                        "events": len(chunk_rows),
+                        "replay_idx": replay_idx,
+                    }
+                )
+                placement_job["event_count"] += len(chunk_rows)
+
+    for placement_key in sorted(
+        placement_jobs,
+        key=lambda key: (
+            placement_jobs[key]["placement_pos"],
+            placement_jobs[key]["placement_tag"],
+        ),
+    ):
+        placement_job = placement_jobs[placement_key]
+        placement_file = placement_job["placement_file"]
+        placement_tag = placement_job["placement_tag"]
+        placement_pos = placement_job["placement_pos"]
+        event_count = placement_job["event_count"]
+        if event_count <= 0:
+            continue
+
+        env = build_stageb_env(
+            os.environ,
+            build_dir,
+            project_root,
+            bn_wt,
+            zns_wt,
+            ratio,
+            placement_file,
+        )
+        env["BNZS_INPUT_DIR"] = relative_to_dir(
+            chunk_root / ratio / f"placement_{placement_pos:04d}_{placement_tag}",
+            build_dir,
+        )
+
+        replay_per_capture = replay_per_capture_from_env(env)
+        beam_on_count = event_count * replay_per_capture
+        macro_to_run = make_beamon_macro(build_dir, macro, beam_on_count)
+        log_file = log_root / ratio / "grouped" / f"p{placement_pos:04d}_{placement_tag}.log"
+
+        total_runs += 1
+        print(
+            f">>> {ratio} grouped placement {placement_pos}/{len(placement_jobs)} "
+            f"events={event_count} beamOn={beam_on_count} placement={placement_tag} "
+            f"chunks={len(placement_job['parts'])}"
+        )
+
+        try:
+            code = run_one(build_dir, executable, macro_to_run, env, log_file, args.dry_run)
+        finally:
+            macro_to_run.unlink(missing_ok=True)
+        if code != 0:
+            failed_runs += 1
+            print(f"!!! Failed code={code}: {log_file}")
+            raise SystemExit(code)
+
+    merge_ratio_outputs(project_root, ratio, source_tags, args.keep_part_outputs)
+    return total_runs, failed_runs
+
+
 def main():
     args = parse_args()
     if args.replay_multiplier <= 0:
@@ -530,114 +869,47 @@ def main():
 
         print()
         print(f"=== Ratio {ratio}: {len(capture_files)} capture files, {len(placement_files)} placements ===")
+        assignments = collect_ratio_capture_assignments(
+            ratio,
+            capture_files,
+            placement_files,
+            args.min_thickness_um,
+            args.replay_multiplier,
+            args.seed,
+        )
 
-        for capture_file in capture_files:
-            header, rows = read_capture_rows(capture_file, args.min_thickness_um)
-            if not rows:
-                print(f">>> Skip {ratio}/{capture_file.name}: no compatible records")
-                continue
+        if args.group_by_placement:
+            runs, failures = run_grouped_by_placement(
+                args,
+                project_root,
+                build_dir,
+                executable,
+                macro,
+                chunk_root,
+                log_root,
+                ratio,
+                bn_wt,
+                zns_wt,
+                placement_files,
+                assignments,
+            )
+        else:
+            runs, failures = run_grouped_by_chunk(
+                args,
+                project_root,
+                build_dir,
+                executable,
+                macro,
+                chunk_root,
+                log_root,
+                ratio,
+                bn_wt,
+                zns_wt,
+                assignments,
+            )
 
-            source_tag = capture_file.name.replace("_neutron_capture_positions.csv", "")
-
-            shuffled = list(rows)
-            rng = random.Random(stable_seed(args.seed, ratio, capture_file.name))
-            rng.shuffle(shuffled)
-
-            placements = list(placement_files)
-            rng.shuffle(placements)
-
-            for replay_idx in range(args.replay_multiplier):
-
-                chunks = [[] for _ in placements]
-                for idx, row in enumerate(shuffled):
-                    # A replay round shifts each record to a different placement
-                    # while preserving near-equal chunk sizes.
-                    chunks[(idx + replay_idx) % len(placements)].append(row)
-
-                for placement_idx, (placement_file, chunk_rows) in enumerate(zip(placements, chunks)):
-                    if not chunk_rows:
-                        continue
-
-                    placement_tag = placement_file.stem
-                    chunk_name = (
-                        f"{source_tag}_m{replay_idx + 1:02d}_"
-                        f"p{placement_idx + 1:04d}_{placement_tag}_"
-                        "neutron_capture_positions.csv"
-                    )
-                    chunk_path = chunk_root / ratio / source_tag / f"m{replay_idx + 1:02d}" / chunk_name
-                    write_chunk(chunk_path, header, chunk_rows)
-
-                    log_file = (
-                        log_root
-                        / ratio
-                        / source_tag
-                        / f"m{replay_idx + 1:02d}"
-                        / f"p{placement_idx + 1:04d}_{placement_tag}.log"
-                    )
-
-                    env = os.environ.copy()
-                    env["BNZS_RUN_MODE"] = "StageB_ReplayAlphaLi"
-                    env["BNZS_INPUT_CSV"] = relative_to_dir(chunk_path, build_dir)
-                    env.pop("BNZS_INPUT_DIR", None)
-                    env["BNZS_BN_WT"] = bn_wt
-                    env["BNZS_ZNS_WT"] = zns_wt
-                    env["BNZS_OUTPUT_RATIO"] = ratio
-                    env["BNZS_PLACEMENT_FILE"] = relative_to_dir(placement_file, project_root)
-                    if "BNZS_STAGEB_OUTPUT_MODE" in os.environ:
-                        env["BNZS_STAGEB_OUTPUT_MODE"] = os.environ["BNZS_STAGEB_OUTPUT_MODE"]
-                    if "BNZS_ALPHALI_REPLAY_PER_CAPTURE" in os.environ:
-                        env["BNZS_ALPHALI_REPLAY_PER_CAPTURE"] = os.environ["BNZS_ALPHALI_REPLAY_PER_CAPTURE"]
-
-                    replay_per_capture = int(env.get("BNZS_ALPHALI_REPLAY_PER_CAPTURE", "1"))
-                    beam_on_count = len(chunk_rows) * replay_per_capture
-                    macro_to_run = make_beamon_macro(build_dir, macro, beam_on_count)
-
-                    total_runs += 1
-                    print(
-                        f">>> {ratio} {source_tag} m{replay_idx + 1:02d} "
-                        f"placement {placement_idx + 1}/{len(placements)} "
-                        f"events={len(chunk_rows)} beamOn={beam_on_count} placement={placement_tag}"
-                    )
-
-                    try:
-                        code = run_one(build_dir, executable, macro_to_run, env, log_file, args.dry_run)
-                    finally:
-                        macro_to_run.unlink(missing_ok=True)
-                    if code != 0:
-                        failed_runs += 1
-                        print(f"!!! Failed code={code}: {log_file}")
-                        raise SystemExit(code)
-
-            output_ratio_dir = project_root / "Output" / "stageB" / ratio
-            merged_results = [
-                merge_step_outputs(
-                    output_ratio_dir,
-                    source_tag,
-                    remove_parts=not args.keep_part_outputs,
-                ),
-                merge_capture_anchor_outputs(
-                    output_ratio_dir,
-                    source_tag,
-                    remove_parts=not args.keep_part_outputs,
-                ),
-                merge_zns_track_outputs(
-                    output_ratio_dir,
-                    source_tag,
-                    remove_parts=not args.keep_part_outputs,
-                ),
-                merge_boundary_summary_outputs(
-                    output_ratio_dir,
-                    source_tag,
-                    remove_parts=not args.keep_part_outputs,
-                ),
-            ]
-            for rows_merged, merged_path in merged_results:
-                if merged_path is None:
-                    continue
-                print(
-                    f">>> Merged {ratio} {source_tag}: "
-                    f"rows={rows_merged} -> {merged_path.name}"
-                )
+        total_runs += runs
+        failed_runs += failures
 
     print()
     print(f"=== Stage B balanced cycling complete: runs={total_runs}, failed={failed_runs} ===")
