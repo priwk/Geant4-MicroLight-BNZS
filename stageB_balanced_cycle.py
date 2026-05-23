@@ -9,7 +9,13 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+
+DEFAULT_STAGEB_THICKNESSES = (
+    "30,40,50,70,100,125,150,175,200,225,250,275,300,325,350,375,400,500,700,1000"
+)
 
 
 def parse_args():
@@ -20,6 +26,14 @@ def parse_args():
     parser.add_argument("--replay-multiplier", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260427)
     parser.add_argument("--min-thickness-um", type=float, default=30.0)
+    parser.add_argument(
+        "--thicknesses",
+        default=None,
+        help=(
+            "Comma-separated thickness whitelist in um. When set, only matching "
+            "*_neutron_capture_positions.csv files are processed."
+        ),
+    )
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--build-dir", default=None)
     parser.add_argument("--executable", default=None)
@@ -42,6 +56,28 @@ def natural_float_tag(path):
         return math.inf
 
 
+def normalize_numeric_tag(value):
+    return f"{float(value):.12g}"
+
+
+def parse_thickness_whitelist(args_value, env_value):
+    raw = args_value if args_value is not None else env_value
+    if raw is None:
+        return None
+
+    values = set()
+    for item in str(raw).split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            values.add(normalize_numeric_tag(token))
+        except ValueError as exc:
+            raise SystemExit(f"Invalid thickness value in whitelist: {token!r}") from exc
+
+    return values if values else None
+
+
 def stable_seed(base_seed, *parts):
     h = hashlib.sha256()
     h.update(str(base_seed).encode("utf-8"))
@@ -51,6 +87,12 @@ def stable_seed(base_seed, *parts):
     return int.from_bytes(h.digest()[:8], "big")
 
 
+def ensure_record_index_header(header):
+    if "record_index" in header:
+        return header, header.index("record_index")
+    return header + ["record_index"], len(header)
+
+
 def read_capture_rows(csv_path, min_thickness_um):
     rows = []
     with open(csv_path, newline="") as f:
@@ -58,8 +100,9 @@ def read_capture_rows(csv_path, min_thickness_um):
         header = next(reader, None)
         if header is None:
             return [], []
+        header, record_index_col = ensure_record_index_header(list(header))
 
-        for row in reader:
+        for idx, row in enumerate(reader):
             if not row:
                 continue
             try:
@@ -68,6 +111,10 @@ def read_capture_rows(csv_path, min_thickness_um):
                 continue
             if thickness + 1.0e-12 < min_thickness_um:
                 continue
+            if len(row) <= record_index_col:
+                row = list(row) + [""] * (record_index_col + 1 - len(row))
+            if not row[record_index_col].strip():
+                row[record_index_col] = str(idx)
             rows.append(row)
     return header, rows
 
@@ -99,6 +146,20 @@ def relative_to_dir(path, start_dir):
         return os.path.relpath(candidate, start_dir)
 
 
+def resolve_capture_input_root(project_root):
+    preferred = project_root / "Input" / "stageA"
+    legacy = project_root / "Input" / "neutron_capture_positions"
+    if preferred.is_dir():
+        return preferred, True
+    return legacy, False
+
+
+def ratio_capture_dir(input_root, ratio, stagea_layout):
+    if stagea_layout:
+        return input_root / ratio / "neutron_capture_positions"
+    return input_root / ratio
+
+
 def run_one(build_dir, executable, macro, env, log_file, dry_run):
     log_file.parent.mkdir(parents=True, exist_ok=True)
     cmd = [str(executable), str(macro)]
@@ -107,11 +168,35 @@ def run_one(build_dir, executable, macro, env, log_file, dry_run):
         print("DRY RUN:", " ".join(cmd))
         print("  BNZS_INPUT_CSV=", env.get("BNZS_INPUT_CSV"))
         print("  BNZS_PLACEMENT_FILE=", env.get("BNZS_PLACEMENT_FILE"))
+        print("  BNZS_STAGEB_OUTPUT_MODE=", env.get("BNZS_STAGEB_OUTPUT_MODE"))
+        print("  BNZS_ALPHALI_REPLAY_PER_CAPTURE=", env.get("BNZS_ALPHALI_REPLAY_PER_CAPTURE"))
         print("  log=", log_file)
         return 0
 
     with open(log_file, "w") as log:
         return subprocess.call(cmd, cwd=build_dir, env=env, stdout=log, stderr=subprocess.STDOUT)
+
+
+def make_beamon_macro(build_dir, base_macro, beam_on_count):
+    with open(base_macro, encoding="utf-8") as src:
+        lines = src.readlines()
+
+    filtered = [
+        line for line in lines
+        if not line.lstrip().startswith("/run/beamOn")
+    ]
+    filtered.append(f"/run/beamOn {beam_on_count}\n")
+
+    fd, path = tempfile.mkstemp(
+        prefix="stageb_beamon_",
+        suffix=".mac",
+        dir=build_dir,
+        text=True,
+    )
+    os.close(fd)
+    with open(path, "w", encoding="utf-8") as out:
+        out.writelines(filtered)
+    return Path(path)
 
 
 def merge_step_outputs(output_ratio_dir, source_tag, remove_parts):
@@ -159,12 +244,170 @@ def merge_step_outputs(output_ratio_dir, source_tag, remove_parts):
     return total_rows, merged_path
 
 
+def merge_capture_anchor_outputs(output_ratio_dir, source_tag, remove_parts):
+    part_files = sorted(output_ratio_dir.glob(f"{source_tag}_m*_p*_capture_anchors.csv"))
+    if not part_files:
+        return 0, None
+
+    merged_path = output_ratio_dir / f"{source_tag}_capture_anchors.csv"
+    tmp_path = output_ratio_dir / f".{source_tag}_capture_anchors.tmp"
+
+    total_rows = 0
+    header_written = False
+    with open(tmp_path, "w", newline="") as out:
+        writer = None
+        for part_file in part_files:
+            with open(part_file, newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if header is None:
+                    continue
+                if not header_written:
+                    writer = csv.writer(out)
+                    writer.writerow(header)
+                    header_written = True
+                for row in reader:
+                    if not row:
+                        continue
+                    writer.writerow(row)
+                    total_rows += 1
+
+    if not header_written:
+        tmp_path.unlink(missing_ok=True)
+        return 0, None
+
+    tmp_path.replace(merged_path)
+    if remove_parts:
+        for part_file in part_files:
+            part_file.unlink(missing_ok=True)
+    return total_rows, merged_path
+
+
+def merge_zns_track_outputs(output_ratio_dir, source_tag, remove_parts):
+    part_files = sorted(output_ratio_dir.glob(f"{source_tag}_m*_p*_zns_track_steps.csv"))
+    if not part_files:
+        return 0, None
+
+    merged_path = output_ratio_dir / f"{source_tag}_zns_track_steps.csv"
+    tmp_path = output_ratio_dir / f".{source_tag}_zns_track_steps.tmp"
+
+    total_rows = 0
+    header_written = False
+    with open(tmp_path, "w", newline="") as out:
+        writer = None
+        for part_file in part_files:
+            with open(part_file, newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if header is None:
+                    continue
+                if not header_written:
+                    writer = csv.writer(out)
+                    writer.writerow(header)
+                    header_written = True
+                for row in reader:
+                    if not row:
+                        continue
+                    writer.writerow(row)
+                    total_rows += 1
+
+    if not header_written:
+        tmp_path.unlink(missing_ok=True)
+        return 0, None
+
+    tmp_path.replace(merged_path)
+    if remove_parts:
+        for part_file in part_files:
+            part_file.unlink(missing_ok=True)
+    return total_rows, merged_path
+
+
+def merge_boundary_summary_outputs(output_ratio_dir, source_tag, remove_parts):
+    part_files = sorted(output_ratio_dir.glob(f"{source_tag}_m*_p*_boundary_stop_summary.csv"))
+    if not part_files:
+        return 0, None
+
+    merged_path = output_ratio_dir / f"{source_tag}_boundary_stop_summary.csv"
+    fieldnames = [
+        "thickness_um",
+        "placement_file",
+        "n_physical_surface_exit",
+        "sum_physical_surface_exit_ekin_post_keV",
+        "n_unexpected_artificial_exit",
+        "sum_unexpected_artificial_exit_ekin_post_keV",
+        "max_unexpected_artificial_exit_ekin_post_keV",
+        "n_unexpected_artificial_exit_alpha",
+        "sum_unexpected_artificial_exit_alpha_ekin_post_keV",
+        "n_unexpected_artificial_exit_Li7",
+        "sum_unexpected_artificial_exit_Li7_ekin_post_keV",
+        "n_unexpected_bulk_exit",
+        "sum_unexpected_bulk_exit_ekin_post_keV",
+    ]
+    int_fields = {
+        "n_physical_surface_exit",
+        "n_unexpected_artificial_exit",
+        "n_unexpected_artificial_exit_alpha",
+        "n_unexpected_artificial_exit_Li7",
+        "n_unexpected_bulk_exit",
+    }
+    max_field = "max_unexpected_artificial_exit_ekin_post_keV"
+
+    merged = {}
+    for part_file in part_files:
+        with open(part_file, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                key = (
+                    normalize_numeric_tag(row.get("thickness_um", "0")),
+                    row.get("placement_file", "").strip(),
+                )
+                acc = merged.setdefault(
+                    key,
+                    {
+                        "thickness_um": key[0],
+                        "placement_file": key[1],
+                        **{name: 0 for name in int_fields},
+                        **{
+                            name: 0.0
+                            for name in fieldnames
+                            if name not in {"thickness_um", "placement_file"} | int_fields
+                        },
+                    },
+                )
+                for name in fieldnames:
+                    if name in {"thickness_um", "placement_file"}:
+                        continue
+                    value = row.get(name, "").strip() or "0"
+                    if name in int_fields:
+                        acc[name] += int(float(value))
+                    elif name == max_field:
+                        acc[name] = max(acc[name], float(value))
+                    else:
+                        acc[name] += float(value)
+
+    with open(merged_path, "w", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for key in sorted(merged, key=lambda item: (float(item[0]), item[1])):
+            record = merged[key]
+            writer.writerow(record)
+
+    if remove_parts:
+        for part_file in part_files:
+            part_file.unlink(missing_ok=True)
+
+    return len(merged), merged_path
+
+
 def merge_existing_outputs(project_root, ratios, remove_parts, dry_run=False):
     output_root = project_root / "Output" / "stageB"
     if not ratios:
         ratios = sorted(p.name for p in output_root.iterdir() if p.is_dir()) if output_root.exists() else []
 
-    pattern = re.compile(r"^(?P<tag>.+)_m\d+_p\d+_.+_alpha_li_steps\.csv$")
+    pattern = re.compile(
+        r"^(?P<tag>.+)_m\d+_p\d+_(?:.+_)?"
+        r"(?P<kind>alpha_li_steps|capture_anchors|zns_track_steps|boundary_stop_summary)\.csv$"
+    )
     merged_any = False
 
     for ratio in ratios:
@@ -176,7 +419,7 @@ def merge_existing_outputs(project_root, ratios, remove_parts, dry_run=False):
         source_tags = sorted(
             {
                 match.group("tag")
-                for path in ratio_dir.glob("*_alpha_li_steps.csv")
+                for path in ratio_dir.glob("*.csv")
                 for match in [pattern.match(path.name)]
                 if match is not None
             }
@@ -184,15 +427,22 @@ def merge_existing_outputs(project_root, ratios, remove_parts, dry_run=False):
 
         for source_tag in source_tags:
             if dry_run:
-                part_count = len(list(ratio_dir.glob(f"{source_tag}_m*_p*_alpha_li_steps.csv")))
+                part_count = len(list(ratio_dir.glob(f"{source_tag}_m*_p*_*.csv")))
                 print(
                     f"DRY RUN: would merge {part_count} files for "
-                    f"{ratio}/{source_tag} -> {source_tag}_alpha_li_steps.csv"
+                    f"{ratio}/{source_tag}"
                 )
                 continue
 
-            rows_merged, merged_path = merge_step_outputs(ratio_dir, source_tag, remove_parts)
-            if merged_path is not None:
+            merged_results = [
+                merge_step_outputs(ratio_dir, source_tag, remove_parts),
+                merge_capture_anchor_outputs(ratio_dir, source_tag, remove_parts),
+                merge_zns_track_outputs(ratio_dir, source_tag, remove_parts),
+                merge_boundary_summary_outputs(ratio_dir, source_tag, remove_parts),
+            ]
+            for rows_merged, merged_path in merged_results:
+                if merged_path is None:
+                    continue
                 merged_any = True
                 print(
                     f">>> Merged {ratio} {source_tag}: "
@@ -207,6 +457,10 @@ def main():
     args = parse_args()
     if args.replay_multiplier <= 0:
         raise SystemExit("--replay-multiplier must be > 0")
+    thickness_whitelist = parse_thickness_whitelist(
+        args.thicknesses,
+        os.environ.get("STAGEB_THICKNESSES"),
+    )
 
     project_root = Path(args.project_root).resolve() if args.project_root else Path(__file__).resolve().parent
     build_dir = Path(args.build_dir).resolve() if args.build_dir else project_root / "build"
@@ -217,14 +471,18 @@ def main():
     )
     macro = Path(args.macro).resolve() if args.macro else project_root / "run.mac"
 
-    input_root = project_root / "Input" / "neutron_capture_positions"
+    input_root, stagea_layout = resolve_capture_input_root(project_root)
     placement_root = project_root / "Input" / "placements"
     chunk_root = build_dir / "stageB_balanced_chunks"
     log_root = project_root / "logs" / "stageB" / "balanced"
 
     ratios = args.ratios
     if not ratios:
-        ratios = sorted(p.name for p in input_root.iterdir() if p.is_dir() and "-" in p.name)
+        ratios = sorted(
+            p.name
+            for p in input_root.iterdir()
+            if p.is_dir() and "-" in p.name and ratio_capture_dir(input_root, p.name, stagea_layout).is_dir()
+        )
 
     if not ratios:
         raise SystemExit(f"No ratio directories found under {input_root}")
@@ -249,11 +507,16 @@ def main():
 
     for ratio in ratios:
         bn_wt, zns_wt = ratio_parts(ratio)
-        ratio_input_dir = input_root / ratio
+        ratio_input_dir = ratio_capture_dir(input_root, ratio, stagea_layout)
         ratio_placement_dir = placement_root / ratio
 
         capture_files = sorted(
-            ratio_input_dir.glob("*_neutron_capture_positions.csv"),
+            (
+                path
+                for path in ratio_input_dir.glob("*_neutron_capture_positions.csv")
+                if thickness_whitelist is None
+                or normalize_numeric_tag(natural_float_tag(path)) in thickness_whitelist
+            ),
             key=lambda p: (natural_float_tag(p), p.name),
         )
         placement_files = sorted(ratio_placement_dir.glob("*.csv"))
@@ -320,27 +583,57 @@ def main():
                     env["BNZS_ZNS_WT"] = zns_wt
                     env["BNZS_OUTPUT_RATIO"] = ratio
                     env["BNZS_PLACEMENT_FILE"] = relative_to_dir(placement_file, project_root)
+                    if "BNZS_STAGEB_OUTPUT_MODE" in os.environ:
+                        env["BNZS_STAGEB_OUTPUT_MODE"] = os.environ["BNZS_STAGEB_OUTPUT_MODE"]
+                    if "BNZS_ALPHALI_REPLAY_PER_CAPTURE" in os.environ:
+                        env["BNZS_ALPHALI_REPLAY_PER_CAPTURE"] = os.environ["BNZS_ALPHALI_REPLAY_PER_CAPTURE"]
+
+                    replay_per_capture = int(env.get("BNZS_ALPHALI_REPLAY_PER_CAPTURE", "1"))
+                    beam_on_count = len(chunk_rows) * replay_per_capture
+                    macro_to_run = make_beamon_macro(build_dir, macro, beam_on_count)
 
                     total_runs += 1
                     print(
                         f">>> {ratio} {source_tag} m{replay_idx + 1:02d} "
                         f"placement {placement_idx + 1}/{len(placements)} "
-                        f"events={len(chunk_rows)} placement={placement_tag}"
+                        f"events={len(chunk_rows)} beamOn={beam_on_count} placement={placement_tag}"
                     )
 
-                    code = run_one(build_dir, executable, macro, env, log_file, args.dry_run)
+                    try:
+                        code = run_one(build_dir, executable, macro_to_run, env, log_file, args.dry_run)
+                    finally:
+                        macro_to_run.unlink(missing_ok=True)
                     if code != 0:
                         failed_runs += 1
                         print(f"!!! Failed code={code}: {log_file}")
                         raise SystemExit(code)
 
             output_ratio_dir = project_root / "Output" / "stageB" / ratio
-            rows_merged, merged_path = merge_step_outputs(
-                output_ratio_dir,
-                source_tag,
-                remove_parts=not args.keep_part_outputs,
-            )
-            if merged_path is not None:
+            merged_results = [
+                merge_step_outputs(
+                    output_ratio_dir,
+                    source_tag,
+                    remove_parts=not args.keep_part_outputs,
+                ),
+                merge_capture_anchor_outputs(
+                    output_ratio_dir,
+                    source_tag,
+                    remove_parts=not args.keep_part_outputs,
+                ),
+                merge_zns_track_outputs(
+                    output_ratio_dir,
+                    source_tag,
+                    remove_parts=not args.keep_part_outputs,
+                ),
+                merge_boundary_summary_outputs(
+                    output_ratio_dir,
+                    source_tag,
+                    remove_parts=not args.keep_part_outputs,
+                ),
+            ]
+            for rows_merged, merged_path in merged_results:
+                if merged_path is None:
+                    continue
                 print(
                     f">>> Merged {ratio} {source_tag}: "
                     f"rows={rows_merged} -> {merged_path.name}"

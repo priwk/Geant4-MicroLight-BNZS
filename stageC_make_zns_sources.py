@@ -10,12 +10,20 @@ from pathlib import Path
 ALPHA_LI_STEPS_RE = re.compile(
     r"^(?P<thickness>[+]?(?:\d+(?:\.\d*)?|\.\d+))_alpha_li_steps\.csv$"
 )
+CAPTURE_ANCHORS_RE = re.compile(
+    r"^(?P<thickness>[+]?(?:\d+(?:\.\d*)?|\.\d+))_capture_anchors\.csv$"
+)
+ZNS_TRACK_STEPS_RE = re.compile(
+    r"^(?P<thickness>[+]?(?:\d+(?:\.\d*)?|\.\d+))_zns_track_steps\.csv$"
+)
 
 
 STEP_OUTPUT_FIELDS = [
+    "physical_event_uid",
     "source_event_uid",
     "source_step_uid",
     "eventID",
+    "record_index",
     "trackID",
     "stepID",
     "particle",
@@ -27,6 +35,13 @@ STEP_OUTPUT_FIELDS = [
     "capture_depth_um",
     "placement_file",
     "placement_hash",
+    "surface_mode",
+    "local_capture_x_um",
+    "local_capture_y_um",
+    "local_capture_z_um",
+    "alphali_replay_index",
+    "alphali_replay_count",
+    "trajectory_weight",
     "source_model",
     "sampling_model",
     "phase_pre",
@@ -49,8 +64,10 @@ STEP_OUTPUT_FIELDS = [
 
 
 EVENT_OUTPUT_FIELDS = [
+    "physical_event_uid",
     "source_event_uid",
     "eventID",
+    "record_index",
     "thickness_um",
     "bn_wt",
     "zns_wt",
@@ -62,8 +79,12 @@ EVENT_OUTPUT_FIELDS = [
     "local_capture_x_um",
     "local_capture_y_um",
     "local_capture_z_um",
+    "surface_mode",
     "placement_file",
     "placement_hash",
+    "alphali_replay_index",
+    "alphali_replay_count",
+    "trajectory_weight",
     "n_total_steps",
     "edep_ZnS_keV",
     "edep_total_keV",
@@ -95,6 +116,53 @@ REQUIRED_INPUT_FIELDS = [
     "z_post_um",
     "step_len_um",
     "edep_keV",
+]
+
+
+REQUIRED_ANCHOR_FIELDS = [
+    "physical_event_uid",
+    "source_event_uid",
+    "eventID",
+    "record_index",
+    "thickness_um",
+    "bn_wt",
+    "zns_wt",
+    "depth_um",
+    "capture_x_um",
+    "capture_y_um",
+    "local_capture_x_um",
+    "local_capture_y_um",
+    "local_capture_z_um",
+    "surface_mode",
+    "placement_file",
+    "alphali_replay_index",
+    "alphali_replay_count",
+    "trajectory_weight",
+]
+
+
+REQUIRED_TRACK_FIELDS = [
+    "physical_event_uid",
+    "source_event_uid",
+    "eventID",
+    "record_index",
+    "trackID",
+    "stepID",
+    "particle",
+    "phase_post",
+    "x_pre_um",
+    "y_pre_um",
+    "z_pre_um",
+    "x_post_um",
+    "y_post_um",
+    "z_post_um",
+    "step_len_um",
+    "edep_keV",
+    "ekin_pre_keV",
+    "ekin_post_keV",
+    "alphali_replay_index",
+    "alphali_replay_count",
+    "trajectory_weight",
 ]
 
 
@@ -262,12 +330,17 @@ def placement_hash(placement_file):
 
 
 def event_uid(row):
+    source = str(row.get("source_event_uid", "")).strip()
+    if source:
+        return source
     return "|".join(
         [
             ratio_label_from_row(row),
             str(row.get("thickness_um", "")).strip(),
             placement_hash(row.get("placement_file", "")),
             str(row.get("eventID", "")).strip(),
+            str(row.get("record_index", "")).strip(),
+            str(row.get("alphali_replay_index", "")).strip(),
         ]
     )
 
@@ -391,9 +464,11 @@ def make_step_row(row, birks_kb, yield_zns, line_number):
     placement_id = placement_hash(row["placement_file"])
 
     return {
+        "physical_event_uid": row.get("physical_event_uid", ""),
         "source_event_uid": event_uid(row),
         "source_step_uid": step_uid(row),
         "eventID": row["eventID"],
+        "record_index": row.get("record_index", ""),
         "trackID": row["trackID"],
         "stepID": row["stepID"],
         "particle": row["particle"],
@@ -405,6 +480,13 @@ def make_step_row(row, birks_kb, yield_zns, line_number):
         "capture_depth_um": row["depth_um"],
         "placement_file": row["placement_file"],
         "placement_hash": placement_id,
+        "surface_mode": row.get("surface_mode", ""),
+        "local_capture_x_um": row.get("local_capture_x_um", ""),
+        "local_capture_y_um": row.get("local_capture_y_um", ""),
+        "local_capture_z_um": row.get("local_capture_z_um", ""),
+        "alphali_replay_index": row.get("alphali_replay_index", "0"),
+        "alphali_replay_count": row.get("alphali_replay_count", "1"),
+        "trajectory_weight": row.get("trajectory_weight", ""),
         "source_model": "trajectory_conditioned_alpha_li",
         "sampling_model": "uniformAlongStep",
         "phase_pre": row["phase_pre"],
@@ -431,8 +513,10 @@ def ensure_event_summary(events, row):
     event = events.get(uid)
     if event is None:
         event = {
+            "physical_event_uid": row.get("physical_event_uid", ""),
             "source_event_uid": uid,
             "eventID": row["eventID"],
+            "record_index": row.get("record_index", ""),
             "thickness_um": row["thickness_um"],
             "bn_wt": row["bn_wt"],
             "zns_wt": row["zns_wt"],
@@ -444,8 +528,12 @@ def ensure_event_summary(events, row):
             "local_capture_x_um": row.get("local_capture_x_um", ""),
             "local_capture_y_um": row.get("local_capture_y_um", ""),
             "local_capture_z_um": row.get("local_capture_z_um", ""),
+            "surface_mode": row.get("surface_mode", ""),
             "placement_file": row["placement_file"],
             "placement_hash": placement_hash(row["placement_file"]),
+            "alphali_replay_index": row.get("alphali_replay_index", "0"),
+            "alphali_replay_count": row.get("alphali_replay_count", "1"),
+            "trajectory_weight": row.get("trajectory_weight", ""),
             "n_total_steps": 0,
             "edep_total_keV": 0.0,
             "edep_ZnS_keV": 0.0,
@@ -476,8 +564,10 @@ def event_output_row(event, yield_zns):
     n_photon0 = visible / 1000.0 * yield_zns
 
     return {
+        "physical_event_uid": event["physical_event_uid"],
         "source_event_uid": event["source_event_uid"],
         "eventID": event["eventID"],
+        "record_index": event["record_index"],
         "thickness_um": event["thickness_um"],
         "bn_wt": event["bn_wt"],
         "zns_wt": event["zns_wt"],
@@ -489,8 +579,12 @@ def event_output_row(event, yield_zns):
         "local_capture_x_um": event["local_capture_x_um"],
         "local_capture_y_um": event["local_capture_y_um"],
         "local_capture_z_um": event["local_capture_z_um"],
+        "surface_mode": event["surface_mode"],
         "placement_file": event["placement_file"],
         "placement_hash": event["placement_hash"],
+        "alphali_replay_index": event["alphali_replay_index"],
+        "alphali_replay_count": event["alphali_replay_count"],
+        "trajectory_weight": event["trajectory_weight"],
         "n_total_steps": str(event["n_total_steps"]),
         "edep_ZnS_keV": fmt(edep),
         "edep_total_keV": fmt(event["edep_total_keV"]),
@@ -575,6 +669,154 @@ def process_csv(
         "zns_rows": zns_rows,
         "events": len(events),
         "placements": 1 if zns_rows > 0 else 0,
+    }
+
+
+def load_anchor_events(anchor_csv, project_root, ratio_tag=None):
+    events = OrderedDict()
+    with open(anchor_csv, newline="", encoding="utf-8-sig") as src:
+        reader = csv.DictReader(src)
+        require_fields(reader.fieldnames, REQUIRED_ANCHOR_FIELDS)
+        for line_idx, row in enumerate(reader, start=2):
+            row = dict(row)
+            row["placement_file"] = normalize_placement_file(
+                row.get("placement_file", ""),
+                project_root=project_root,
+                ratio_tag=ratio_tag,
+            )
+            uid = event_uid(row)
+            row["source_event_uid"] = uid
+            if uid in events:
+                raise SystemExit(
+                    f"Duplicate source_event_uid in capture anchors at line {line_idx}: {uid}"
+                )
+            events[uid] = {
+                "physical_event_uid": row.get("physical_event_uid", ""),
+                "source_event_uid": uid,
+                "eventID": row["eventID"],
+                "record_index": row.get("record_index", ""),
+                "thickness_um": row["thickness_um"],
+                "bn_wt": row["bn_wt"],
+                "zns_wt": row["zns_wt"],
+                "ratio_label": ratio_label_from_row(row),
+                "depth_um": row["depth_um"],
+                "capture_depth_um": row["depth_um"],
+                "capture_x_um": row.get("capture_x_um", ""),
+                "capture_y_um": row.get("capture_y_um", ""),
+                "local_capture_x_um": row.get("local_capture_x_um", ""),
+                "local_capture_y_um": row.get("local_capture_y_um", ""),
+                "local_capture_z_um": row.get("local_capture_z_um", ""),
+                "surface_mode": row.get("surface_mode", ""),
+                "placement_file": row["placement_file"],
+                "placement_hash": placement_hash(row["placement_file"]),
+                "alphali_replay_index": row.get("alphali_replay_index", "0"),
+                "alphali_replay_count": row.get("alphali_replay_count", "1"),
+                "trajectory_weight": row.get("trajectory_weight", ""),
+                "n_total_steps": 0,
+                "edep_total_keV": 0.0,
+                "edep_ZnS_keV": 0.0,
+                "visible_edep_ZnS_keV": 0.0,
+                "n_zns_steps": 0,
+            }
+    return events
+
+
+def process_slim_pair(
+    anchor_csv,
+    track_csv,
+    step_output,
+    event_output,
+    yield_zns,
+    birks_kb,
+    project_root,
+    ratio_tag=None,
+):
+    anchor_csv = Path(anchor_csv).resolve()
+    track_csv = Path(track_csv).resolve()
+    step_output = Path(step_output).resolve()
+    event_output = Path(event_output).resolve()
+
+    if not anchor_csv.is_file():
+        raise SystemExit(f"Capture anchor CSV not found: {anchor_csv}")
+    if not track_csv.is_file():
+        raise SystemExit(f"ZnS track CSV not found: {track_csv}")
+
+    events = load_anchor_events(anchor_csv, project_root, ratio_tag=ratio_tag)
+    input_rows = 0
+    zns_rows = 0
+
+    step_output.parent.mkdir(parents=True, exist_ok=True)
+    event_output.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(track_csv, newline="", encoding="utf-8-sig") as src, open(
+        step_output, "w", newline="", encoding="utf-8"
+    ) as step_dst:
+        reader = csv.DictReader(src)
+        require_fields(reader.fieldnames, REQUIRED_TRACK_FIELDS)
+
+        step_writer = csv.DictWriter(step_dst, fieldnames=STEP_OUTPUT_FIELDS)
+        step_writer.writeheader()
+
+        for input_rows, row in enumerate(reader, start=1):
+            line_number = input_rows + 1
+            row = dict(row)
+            uid = event_uid(row)
+            anchor = events.get(uid)
+            if anchor is None:
+                raise SystemExit(
+                    f"Track row at line {line_number} references unknown source_event_uid: {uid}"
+                )
+
+            merged_row = {
+                **anchor,
+                **row,
+                "source_event_uid": uid,
+                "phase_pre": "ZnS",
+                "placement_file": anchor["placement_file"],
+                "bn_wt": anchor["bn_wt"],
+                "zns_wt": anchor["zns_wt"],
+                "thickness_um": anchor["thickness_um"],
+                "depth_um": anchor["depth_um"],
+                "local_capture_x_um": anchor["local_capture_x_um"],
+                "local_capture_y_um": anchor["local_capture_y_um"],
+                "local_capture_z_um": anchor["local_capture_z_um"],
+                "surface_mode": anchor["surface_mode"],
+                "capture_x_um": anchor["capture_x_um"],
+                "capture_y_um": anchor["capture_y_um"],
+                "alphali_replay_index": anchor["alphali_replay_index"],
+                "alphali_replay_count": anchor["alphali_replay_count"],
+            }
+
+            edep_kev_all = to_float(merged_row, "edep_keV", line_number)
+            update_event_all_steps(events, merged_row, edep_kev_all)
+
+            step_row, edep_kev, visible_kev = make_step_row(
+                merged_row, birks_kb, yield_zns, line_number
+            )
+            step_writer.writerow(step_row)
+            update_event_zns_summary(events, step_row, edep_kev, visible_kev)
+            zns_rows += 1
+
+    with open(event_output, "w", newline="", encoding="utf-8") as event_dst:
+        event_writer = csv.DictWriter(event_dst, fieldnames=EVENT_OUTPUT_FIELDS)
+        event_writer.writeheader()
+        for event in events.values():
+            event_writer.writerow(event_output_row(event, yield_zns))
+
+    placements = {
+        safe_name(event["placement_file"])
+        for event in events.values()
+        if event.get("placement_file", "").strip()
+    }
+    return {
+        "anchor_csv": anchor_csv,
+        "track_csv": track_csv,
+        "step_output": step_output,
+        "event_output": event_output,
+        "input_rows": input_rows,
+        "zns_rows": zns_rows,
+        "events": len(events),
+        "placements": max(1, len(placements)) if events else 0,
     }
 
 
@@ -754,6 +996,33 @@ def single_file_mode(args):
 
 def stageb_batch_files(stageb_ratio_dir, start_um, end_um):
     matches = []
+    slim_anchors = {}
+    slim_tracks = {}
+
+    for path in stageb_ratio_dir.glob("*_capture_anchors.csv"):
+        match = CAPTURE_ANCHORS_RE.fullmatch(path.name)
+        if match is None:
+            continue
+        thickness_label = match.group("thickness")
+        thickness_um = float(thickness_label)
+        if start_um <= thickness_um <= end_um:
+            slim_anchors[thickness_label] = (thickness_um, path)
+
+    for path in stageb_ratio_dir.glob("*_zns_track_steps.csv"):
+        match = ZNS_TRACK_STEPS_RE.fullmatch(path.name)
+        if match is None:
+            continue
+        thickness_label = match.group("thickness")
+        thickness_um = float(thickness_label)
+        if start_um <= thickness_um <= end_um:
+            slim_tracks[thickness_label] = (thickness_um, path)
+
+    for thickness_label, (thickness_um, anchor_path) in slim_anchors.items():
+        track_entry = slim_tracks.get(thickness_label)
+        if track_entry is None:
+            continue
+        matches.append((thickness_um, thickness_label, ("slim", anchor_path, track_entry[1])))
+
     for path in stageb_ratio_dir.glob("*_alpha_li_steps.csv"):
         match = ALPHA_LI_STEPS_RE.fullmatch(path.name)
         if match is None:
@@ -761,7 +1030,9 @@ def stageb_batch_files(stageb_ratio_dir, start_um, end_um):
         thickness_label = match.group("thickness")
         thickness_um = float(thickness_label)
         if start_um <= thickness_um <= end_um:
-            matches.append((thickness_um, thickness_label, path))
+            if thickness_label in slim_anchors and thickness_label in slim_tracks:
+                continue
+            matches.append((thickness_um, thickness_label, ("full", path)))
     return sorted(matches, key=lambda item: (item[0], item[1]))
 
 
@@ -804,30 +1075,41 @@ def batch_mode(args):
 
     totals = {"input_rows": 0, "zns_rows": 0, "events": 0}
     total_placements = 0
-    for thickness_um, thickness_label, input_csv in files:
+    for thickness_um, thickness_label, stageb_input in files:
         if args.split_by_placement:
-            stats = process_csv_split_by_placement(
-                input_csv,
-                output_ratio_dir,
-                thickness_label,
-                yield_zns=args.yield_zns,
-                birks_kb=args.birks_kb,
-                project_root=project_root,
-                ratio_tag=ratio_tag,
+            raise SystemExit(
+                "--split-by-placement is currently supported only for full "
+                "Stage B alpha_li_steps.csv inputs."
             )
         else:
             step_output = output_ratio_dir / f"{thickness_label}_zns_step_sources.csv"
             event_output = output_ratio_dir / f"{thickness_label}_event_light_sources.csv"
 
-            stats = process_csv(
-                input_csv,
-                step_output,
-                event_output,
-                yield_zns=args.yield_zns,
-                birks_kb=args.birks_kb,
-                project_root=project_root,
-                ratio_tag=ratio_tag,
-            )
+            if stageb_input[0] == "slim":
+                _, anchor_csv, track_csv = stageb_input
+                stats = process_slim_pair(
+                    anchor_csv,
+                    track_csv,
+                    step_output,
+                    event_output,
+                    yield_zns=args.yield_zns,
+                    birks_kb=args.birks_kb,
+                    project_root=project_root,
+                    ratio_tag=ratio_tag,
+                )
+                input_desc = f"{anchor_csv.name} + {track_csv.name}"
+            else:
+                _, input_csv = stageb_input
+                stats = process_csv(
+                    input_csv,
+                    step_output,
+                    event_output,
+                    yield_zns=args.yield_zns,
+                    birks_kb=args.birks_kb,
+                    project_root=project_root,
+                    ratio_tag=ratio_tag,
+                )
+                input_desc = input_csv.name
         totals["input_rows"] += stats["input_rows"]
         totals["zns_rows"] += stats["zns_rows"]
         totals["events"] += stats["events"]
@@ -847,7 +1129,7 @@ def batch_mode(args):
             print(
                 f">>> {thickness_um:g} um: rows={stats['input_rows']} "
                 f"ZnS_steps={stats['zns_rows']} events={stats['events']} "
-                f"-> {step_output.name}, {event_output.name}"
+                f"input={input_desc} -> {step_output.name}, {event_output.name}"
             )
 
     print()

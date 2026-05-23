@@ -100,6 +100,13 @@ void ModePrimaryGeneratorAction::GeneratePrimaries(G4Event *event)
 
 PrimaryGeneratorAction *ModePrimaryGeneratorAction::GetStageBPrimaryAction() const
 {
+    if (fStageBPrimary == nullptr &&
+        fConfig != nullptr &&
+        fConfig->runMode == RunMode::StageB_ReplayAlphaLi)
+    {
+        const_cast<ModePrimaryGeneratorAction *>(this)->fStageBPrimary =
+            new PrimaryGeneratorAction(fConfig);
+    }
     return fStageBPrimary;
 }
 

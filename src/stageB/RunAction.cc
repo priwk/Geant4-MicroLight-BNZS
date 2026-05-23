@@ -7,42 +7,48 @@
 #include "G4RunManager.hh"
 #include "G4ios.hh"
 
-// #include <cerrno>
-// #include <cstring>
-// #include <sys/stat.h>
-// #include <sys/types.h>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <sstream>
 
-// --------------------------------------------------------------------
+namespace
+{
+std::string Trim(const std::string &value)
+{
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos)
+        return "";
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+} // namespace
 
 RunAction::RunAction(PrimaryGeneratorAction *primaryAction, AnalysisConfig *config)
     : G4UserRunAction(),
       fPrimaryAction(primaryAction),
-      fStepCsv(),
-      fStepCsvPath(""),
-      fConfig(config)
+      fConfig(config),
+      fOutputMode(ReadOutputMode()),
+      fFullStepCsv(),
+      fFullStepCsvPath(""),
+      fCaptureAnchorCsv(),
+      fCaptureAnchorCsvPath(""),
+      fSlimTrackCsv(),
+      fSlimTrackCsvPath(""),
+      fBoundaryStopSummaryCsvPath(""),
+      fBoundarySummaries()
 {
 }
-
-// --------------------------------------------------------------------
 
 RunAction::~RunAction()
 {
-    if (fStepCsv.is_open())
-    {
-        fStepCsv.close();
-    }
+    CloseOpenOutputs();
 }
-
-// --------------------------------------------------------------------
 
 void RunAction::SetPrimaryAction(const PrimaryGeneratorAction *primaryAction)
 {
     fPrimaryAction = primaryAction;
 }
-
-// --------------------------------------------------------------------
 
 void RunAction::EnsureDataDirectory() const
 {
@@ -61,11 +67,8 @@ void RunAction::EnsureDataDirectory() const
     }
 }
 
-// --------------------------------------------------------------------
-
 std::string RunAction::ExtractThicknessTagFromInputPath(const std::string &inputPath) const
 {
-    // Example: Input/neutron_capture_positions/1-2/125_neutron_capture_positions.csv -> 125
     const std::string key = "_neutron_capture_positions.csv";
 
     std::size_t slashPos = inputPath.find_last_of("/\\");
@@ -82,11 +85,9 @@ std::string RunAction::ExtractThicknessTagFromInputPath(const std::string &input
     return fileName.substr(0, keyPos);
 }
 
-// --------------------------------------------------------------------
-
-std::string RunAction::MakeOutputCsvPathFromInputPath(const std::string &inputPath) const
+RunAction::OutputPaths RunAction::MakeOutputPathsFromInputPath(const std::string &inputPath) const
 {
-    std::string tag = ExtractThicknessTagFromInputPath(inputPath);
+    const std::string tag = ExtractThicknessTagFromInputPath(inputPath);
 
     namespace fs = std::filesystem;
     fs::path inPath(inputPath);
@@ -106,9 +107,14 @@ std::string RunAction::MakeOutputCsvPathFromInputPath(const std::string &inputPa
         }
     }
 
-    fs::path outPath = fs::current_path().parent_path() / "Output" / "stageB" / ratioTag / (tag + "_alpha_li_steps.csv");
+    const fs::path outDir = fs::current_path().parent_path() / "Output" / "stageB" / ratioTag;
 
-    return outPath.string();
+    OutputPaths paths;
+    paths.full_steps = (outDir / (tag + "_alpha_li_steps.csv")).string();
+    paths.capture_anchors = (outDir / (tag + "_capture_anchors.csv")).string();
+    paths.zns_track_steps = (outDir / (tag + "_zns_track_steps.csv")).string();
+    paths.boundary_stop_summary = (outDir / (tag + "_boundary_stop_summary.csv")).string();
+    return paths;
 }
 
 std::string RunAction::RecordInputPathForSummary(const std::string &inputPath) const
@@ -120,20 +126,50 @@ std::string RunAction::MakeOutputCsvPath() const
 {
     if (fPrimaryAction)
     {
-        return MakeOutputCsvPathFromInputPath(fPrimaryAction->GetLoadedInputFile());
+        return MakeOutputPathsFromInputPath(fPrimaryAction->GetLoadedInputFile()).full_steps;
     }
 
-    return MakeOutputCsvPathFromInputPath("unknown_neutron_capture_positions.csv");
+    return MakeOutputPathsFromInputPath("unknown_neutron_capture_positions.csv").full_steps;
 }
 
-// --------------------------------------------------------------------
-
-void RunAction::WriteStepCsvHeader()
+RunAction::OutputMode RunAction::ReadOutputMode() const
 {
-    if (!fStepCsv.is_open())
+    const char *modeEnv = std::getenv("BNZS_STAGEB_OUTPUT_MODE");
+    if (modeEnv == nullptr)
+        return OutputMode::Full;
+
+    const std::string mode = Trim(modeEnv);
+    if (mode == "slim")
+        return OutputMode::Slim;
+    return OutputMode::Full;
+}
+
+void RunAction::CloseOpenOutputs()
+{
+    if (fFullStepCsv.is_open())
+    {
+        fFullStepCsv.flush();
+        fFullStepCsv.close();
+    }
+    if (fCaptureAnchorCsv.is_open())
+    {
+        fCaptureAnchorCsv.flush();
+        fCaptureAnchorCsv.close();
+    }
+    if (fSlimTrackCsv.is_open())
+    {
+        fSlimTrackCsv.flush();
+        fSlimTrackCsv.close();
+    }
+}
+
+void RunAction::WriteFullStepCsvHeader()
+{
+    if (!fFullStepCsv.is_open())
         return;
 
-    fStepCsv
+    fFullStepCsv
+        << "physical_event_uid,"
         << "eventID,"
         << "thickness_um,"
         << "bn_wt,"
@@ -153,6 +189,8 @@ void RunAction::WriteStepCsvHeader()
         << "bn_center_x_um,"
         << "bn_center_y_um,"
         << "bn_center_z_um,"
+        << "alphali_replay_index,"
+        << "alphali_replay_count,"
         << "trackID,"
         << "stepID,"
         << "particle,"
@@ -167,57 +205,304 @@ void RunAction::WriteStepCsvHeader()
         << "step_len_um,"
         << "edep_keV,"
         << "ekin_pre_keV,"
-        << "ekin_post_keV"
+        << "ekin_post_keV,"
+        << "source_event_uid,"
+        << "record_index,"
+        << "trajectory_weight"
         << "\n";
 }
 
-// --------------------------------------------------------------------
-
-void RunAction::SwitchOutputCsvForInputPath(const std::string &inputPath)
+void RunAction::WriteCaptureAnchorCsvHeader()
 {
-    const std::string newPath = MakeOutputCsvPathFromInputPath(inputPath);
+    if (!fCaptureAnchorCsv.is_open())
+        return;
 
-    // already using the correct file
-    if (fStepCsv.is_open() && newPath == fStepCsvPath)
+    fCaptureAnchorCsv
+        << "physical_event_uid,"
+        << "source_event_uid,"
+        << "eventID,"
+        << "record_index,"
+        << "thickness_um,"
+        << "bn_wt,"
+        << "zns_wt,"
+        << "capture_x_um,"
+        << "capture_y_um,"
+        << "corr_x_um,"
+        << "corr_y_um,"
+        << "depth_um,"
+        << "placement_file,"
+        << "local_capture_x_um,"
+        << "local_capture_y_um,"
+        << "local_capture_z_um,"
+        << "surface_mode,"
+        << "target_local_z_um,"
+        << "used_local_z_um,"
+        << "bn_center_x_um,"
+        << "bn_center_y_um,"
+        << "bn_center_z_um,"
+        << "alphali_replay_index,"
+        << "alphali_replay_count,"
+        << "trajectory_weight"
+        << "\n";
+}
+
+void RunAction::WriteSlimTrackCsvHeader()
+{
+    if (!fSlimTrackCsv.is_open())
+        return;
+
+    fSlimTrackCsv
+        << "physical_event_uid,"
+        << "source_event_uid,"
+        << "eventID,"
+        << "record_index,"
+        << "trackID,"
+        << "stepID,"
+        << "particle,"
+        << "phase_post,"
+        << "x_pre_um,"
+        << "y_pre_um,"
+        << "z_pre_um,"
+        << "x_post_um,"
+        << "y_post_um,"
+        << "z_post_um,"
+        << "step_len_um,"
+        << "edep_keV,"
+        << "ekin_pre_keV,"
+        << "ekin_post_keV,"
+        << "alphali_replay_index,"
+        << "alphali_replay_count,"
+        << "trajectory_weight"
+        << "\n";
+}
+
+void RunAction::OpenOutputsForInputPath(const std::string &inputPath)
+{
+    const OutputPaths paths = MakeOutputPathsFromInputPath(inputPath);
+
+    if (IsFullMode() && fFullStepCsv.is_open() && paths.full_steps == fFullStepCsvPath)
+    {
+        return;
+    }
+    if (IsSlimMode() && fCaptureAnchorCsv.is_open() &&
+        paths.capture_anchors == fCaptureAnchorCsvPath &&
+        fSlimTrackCsv.is_open() &&
+        paths.zns_track_steps == fSlimTrackCsvPath)
     {
         return;
     }
 
-    // close previous file if needed
-    if (fStepCsv.is_open())
+    if (IsSlimMode() && !fBoundaryStopSummaryCsvPath.empty())
     {
-        fStepCsv.flush();
-        fStepCsv.close();
-
-        G4cout << "[RunAction] Closed output CSV: " << fStepCsvPath << G4endl;
+        WriteBoundarySummaryCsv();
     }
 
-    fStepCsvPath = newPath;
+    CloseOpenOutputs();
+    fBoundarySummaries.clear();
+
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::create_directories(fs::path(fStepCsvPath).parent_path(), ec);
+    fs::create_directories(fs::path(paths.full_steps).parent_path(), ec);
     if (ec)
     {
         G4cerr << "[RunAction] Warning: failed to create output directory: "
                << ec.message() << G4endl;
     }
 
-    fStepCsv.open(fStepCsvPath.c_str(), std::ios::out);
+    fFullStepCsvPath = paths.full_steps;
+    fCaptureAnchorCsvPath = paths.capture_anchors;
+    fSlimTrackCsvPath = paths.zns_track_steps;
+    fBoundaryStopSummaryCsvPath = paths.boundary_stop_summary;
 
-    if (!fStepCsv.is_open())
+    if (IsFullMode())
     {
-        G4Exception("RunAction::SwitchOutputCsvForInputPath",
-                    "BNZS101", FatalException,
-                    ("Failed to open output CSV: " + fStepCsvPath).c_str());
+        fFullStepCsv.open(fFullStepCsvPath.c_str(), std::ios::out);
+        if (!fFullStepCsv.is_open())
+        {
+            G4Exception("RunAction::OpenOutputsForInputPath",
+                        "BNZS101", FatalException,
+                        ("Failed to open output CSV: " + fFullStepCsvPath).c_str());
+            return;
+        }
+        WriteFullStepCsvHeader();
+        G4cout << "[RunAction] Switched full output CSV to: " << fFullStepCsvPath << G4endl;
         return;
     }
 
-    WriteStepCsvHeader();
+    fCaptureAnchorCsv.open(fCaptureAnchorCsvPath.c_str(), std::ios::out);
+    if (!fCaptureAnchorCsv.is_open())
+    {
+        G4Exception("RunAction::OpenOutputsForInputPath",
+                    "BNZS102", FatalException,
+                    ("Failed to open capture anchor CSV: " + fCaptureAnchorCsvPath).c_str());
+        return;
+    }
+    WriteCaptureAnchorCsvHeader();
 
-    G4cout << "[RunAction] Switched output CSV to: " << fStepCsvPath << G4endl;
+    fSlimTrackCsv.open(fSlimTrackCsvPath.c_str(), std::ios::out);
+    if (!fSlimTrackCsv.is_open())
+    {
+        G4Exception("RunAction::OpenOutputsForInputPath",
+                    "BNZS103", FatalException,
+                    ("Failed to open slim track CSV: " + fSlimTrackCsvPath).c_str());
+        return;
+    }
+    WriteSlimTrackCsvHeader();
+
+    G4cout << "[RunAction] Switched slim output CSVs to:"
+           << "\n  anchors = " << fCaptureAnchorCsvPath
+           << "\n  tracks  = " << fSlimTrackCsvPath
+           << "\n  summary = " << fBoundaryStopSummaryCsvPath
+           << G4endl;
 }
 
-// --------------------------------------------------------------------
+void RunAction::SwitchOutputCsvForInputPath(const std::string &inputPath)
+{
+    OpenOutputsForInputPath(inputPath);
+}
+
+void RunAction::AppendCaptureAnchor(const CaptureAnchorRow &row)
+{
+    const BoundarySummaryKey key{row.thickness_um, row.placement_file};
+    BoundarySummary &summary = fBoundarySummaries[key];
+    summary.thickness_um = row.thickness_um;
+    summary.placement_file = row.placement_file;
+
+    if (!IsSlimMode() || !fCaptureAnchorCsv.is_open())
+        return;
+
+    fCaptureAnchorCsv
+        << row.physical_event_uid << ","
+        << row.source_event_uid << ","
+        << row.eventID << ","
+        << row.record_index << ","
+        << row.thickness_um << ","
+        << row.bn_wt << ","
+        << row.zns_wt << ","
+        << row.capture_x_um << ","
+        << row.capture_y_um << ","
+        << row.corr_x_um << ","
+        << row.corr_y_um << ","
+        << row.depth_um << ","
+        << row.placement_file << ","
+        << row.local_capture_x_um << ","
+        << row.local_capture_y_um << ","
+        << row.local_capture_z_um << ","
+        << row.surface_mode << ","
+        << row.target_local_z_um << ","
+        << row.used_local_z_um << ","
+        << row.bn_center_x_um << ","
+        << row.bn_center_y_um << ","
+        << row.bn_center_z_um << ","
+        << row.alphali_replay_index << ","
+        << row.alphali_replay_count << ","
+        << row.trajectory_weight
+        << "\n";
+}
+
+void RunAction::RecordBoundaryExit(const CaptureAnchorRow &row,
+                                   const std::string &particle,
+                                   BoundaryExitClass exitClass,
+                                   G4double ekinPostKeV)
+{
+    const BoundarySummaryKey key{row.thickness_um, row.placement_file};
+    BoundarySummary &summary = fBoundarySummaries[key];
+    summary.thickness_um = row.thickness_um;
+    summary.placement_file = row.placement_file;
+
+    if (exitClass == BoundaryExitClass::PhysicalSurfaceExit)
+    {
+        ++summary.n_physical_surface_exit;
+        summary.sum_physical_surface_exit_ekin_post_keV += ekinPostKeV;
+        return;
+    }
+
+    ++summary.n_unexpected_artificial_exit;
+    summary.sum_unexpected_artificial_exit_ekin_post_keV += ekinPostKeV;
+    summary.max_unexpected_artificial_exit_ekin_post_keV =
+        std::max(summary.max_unexpected_artificial_exit_ekin_post_keV, ekinPostKeV);
+
+    if (particle == "alpha")
+    {
+        ++summary.n_unexpected_artificial_exit_alpha;
+        summary.sum_unexpected_artificial_exit_alpha_ekin_post_keV += ekinPostKeV;
+    }
+    else if (particle == "Li7")
+    {
+        ++summary.n_unexpected_artificial_exit_Li7;
+        summary.sum_unexpected_artificial_exit_Li7_ekin_post_keV += ekinPostKeV;
+    }
+
+    if (row.surface_mode == "bulk")
+    {
+        ++summary.n_unexpected_bulk_exit;
+        summary.sum_unexpected_bulk_exit_ekin_post_keV += ekinPostKeV;
+    }
+}
+
+void RunAction::WriteBoundarySummaryCsv()
+{
+    if (!IsSlimMode() || fBoundaryStopSummaryCsvPath.empty())
+        return;
+
+    std::ofstream out(fBoundaryStopSummaryCsvPath.c_str(), std::ios::out);
+    if (!out.is_open())
+    {
+        G4Exception("RunAction::WriteBoundarySummaryCsv",
+                    "BNZS104", FatalException,
+                    ("Failed to open boundary summary CSV: " + fBoundaryStopSummaryCsvPath).c_str());
+        return;
+    }
+
+    out << "thickness_um,"
+        << "placement_file,"
+        << "n_physical_surface_exit,"
+        << "sum_physical_surface_exit_ekin_post_keV,"
+        << "n_unexpected_artificial_exit,"
+        << "sum_unexpected_artificial_exit_ekin_post_keV,"
+        << "max_unexpected_artificial_exit_ekin_post_keV,"
+        << "n_unexpected_artificial_exit_alpha,"
+        << "sum_unexpected_artificial_exit_alpha_ekin_post_keV,"
+        << "n_unexpected_artificial_exit_Li7,"
+        << "sum_unexpected_artificial_exit_Li7_ekin_post_keV,"
+        << "n_unexpected_bulk_exit,"
+        << "sum_unexpected_bulk_exit_ekin_post_keV"
+        << "\n";
+
+    std::int64_t unexpectedCount = 0;
+    G4double unexpectedSum = 0.0;
+    G4double unexpectedMax = 0.0;
+
+    for (const auto &[key, summary] : fBoundarySummaries)
+    {
+        (void)key;
+        out << summary.thickness_um << ","
+            << summary.placement_file << ","
+            << summary.n_physical_surface_exit << ","
+            << summary.sum_physical_surface_exit_ekin_post_keV << ","
+            << summary.n_unexpected_artificial_exit << ","
+            << summary.sum_unexpected_artificial_exit_ekin_post_keV << ","
+            << summary.max_unexpected_artificial_exit_ekin_post_keV << ","
+            << summary.n_unexpected_artificial_exit_alpha << ","
+            << summary.sum_unexpected_artificial_exit_alpha_ekin_post_keV << ","
+            << summary.n_unexpected_artificial_exit_Li7 << ","
+            << summary.sum_unexpected_artificial_exit_Li7_ekin_post_keV << ","
+            << summary.n_unexpected_bulk_exit << ","
+            << summary.sum_unexpected_bulk_exit_ekin_post_keV
+            << "\n";
+
+        unexpectedCount += summary.n_unexpected_artificial_exit;
+        unexpectedSum += summary.sum_unexpected_artificial_exit_ekin_post_keV;
+        unexpectedMax = std::max(
+            unexpectedMax,
+            summary.max_unexpected_artificial_exit_ekin_post_keV);
+    }
+
+    G4cout << "[RunAction] unexpected artificial exits = " << unexpectedCount
+           << "\n[RunAction] sum ekin_post = " << unexpectedSum << " keV"
+           << "\n[RunAction] max ekin_post = " << unexpectedMax << " keV"
+           << G4endl;
+}
 
 void RunAction::BeginOfRunAction(const G4Run *run)
 {
@@ -225,41 +510,26 @@ void RunAction::BeginOfRunAction(const G4Run *run)
 
     EnsureDataDirectory();
 
-    // Open the output corresponding to the current input file.
-    // In streaming mode, this may later be switched automatically
-    // when PrimaryGeneratorAction moves to the next input CSV.
     if (fPrimaryAction)
     {
-        SwitchOutputCsvForInputPath(fPrimaryAction->GetLoadedInputFile());
+        OpenOutputsForInputPath(fPrimaryAction->GetLoadedInputFile());
     }
     else
     {
-        fStepCsvPath = MakeOutputCsvPath();
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        fs::create_directories(fs::path(fStepCsvPath).parent_path(), ec);
-        if (ec)
-        {
-            G4cerr << "[RunAction] Warning: failed to create output directory: "
-                   << ec.message() << G4endl;
-        }
-
-        fStepCsv.open(fStepCsvPath.c_str(), std::ios::out);
-
-        if (!fStepCsv.is_open())
-        {
-            G4Exception("RunAction::BeginOfRunAction",
-                        "BNZS101", FatalException,
-                        ("Failed to open output CSV: " + fStepCsvPath).c_str());
-            return;
-        }
-
-        WriteStepCsvHeader();
+        OpenOutputsForInputPath("unknown_neutron_capture_positions.csv");
     }
 
-    G4cout
-        << "\n[RunAction] Begin run " << run->GetRunID()
-        << "\n  output CSV = " << fStepCsvPath;
+    G4cout << "\n[RunAction] Begin run " << run->GetRunID();
+    if (IsFullMode())
+    {
+        G4cout << "\n  output CSV = " << fFullStepCsvPath;
+    }
+    else
+    {
+        G4cout << "\n  capture anchors = " << fCaptureAnchorCsvPath
+               << "\n  ZnS track CSV   = " << fSlimTrackCsvPath
+               << "\n  boundary summary = " << fBoundaryStopSummaryCsvPath;
+    }
 
     if (fPrimaryAction)
     {
@@ -271,18 +541,25 @@ void RunAction::BeginOfRunAction(const G4Run *run)
     G4cout << G4endl;
 }
 
-// --------------------------------------------------------------------
-
 void RunAction::EndOfRunAction(const G4Run *run)
 {
-    if (fStepCsv.is_open())
+    if (IsSlimMode())
     {
-        fStepCsv.flush();
-        fStepCsv.close();
+        WriteBoundarySummaryCsv();
     }
 
-    G4cout
-        << "\n[RunAction] End run " << run->GetRunID()
-        << "\n  closed CSV = " << fStepCsvPath
-        << G4endl;
+    CloseOpenOutputs();
+
+    G4cout << "\n[RunAction] End run " << run->GetRunID();
+    if (IsFullMode())
+    {
+        G4cout << "\n  closed CSV = " << fFullStepCsvPath;
+    }
+    else
+    {
+        G4cout << "\n  anchors CSV = " << fCaptureAnchorCsvPath
+               << "\n  tracks CSV  = " << fSlimTrackCsvPath
+               << "\n  summary CSV = " << fBoundaryStopSummaryCsvPath;
+    }
+    G4cout << G4endl;
 }

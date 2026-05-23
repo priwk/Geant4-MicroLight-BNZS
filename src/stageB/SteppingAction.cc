@@ -100,6 +100,55 @@ namespace
     {
         return (phase == "outside");
     }
+
+    G4double PatchHalfXYUm(const DetectorConstruction *det)
+    {
+        return 0.5 * det->GetPatchXYUm();
+    }
+
+    G4double PatchHalfZUm(const DetectorConstruction *det)
+    {
+        return 0.5 * det->GetEffectiveLocalThickness() / um;
+    }
+
+    std::string ExitFaceLabel(const G4ThreeVector &position, const DetectorConstruction *det)
+    {
+        const G4double tolUm = 1.0e-3;
+        const G4double xUm = position.x() / um;
+        const G4double yUm = position.y() / um;
+        const G4double zUm = position.z() / um;
+        const G4double halfXYUm = PatchHalfXYUm(det);
+        const G4double halfZUm = PatchHalfZUm(det);
+
+        if (zUm >= halfZUm - tolUm)
+            return "+z";
+        if (zUm <= -halfZUm + tolUm)
+            return "-z";
+        if (xUm >= halfXYUm - tolUm)
+            return "+x";
+        if (xUm <= -halfXYUm + tolUm)
+            return "-x";
+        if (yUm >= halfXYUm - tolUm)
+            return "+y";
+        if (yUm <= -halfXYUm + tolUm)
+            return "-y";
+        return "unknown";
+    }
+
+    RunAction::BoundaryExitClass ClassifyBoundaryExit(
+        const std::string &surfaceMode,
+        const std::string &exitFace)
+    {
+        if (surfaceMode == "front_surface" && exitFace == "+z")
+        {
+            return RunAction::BoundaryExitClass::PhysicalSurfaceExit;
+        }
+        if (surfaceMode == "back_surface" && exitFace == "-z")
+        {
+            return RunAction::BoundaryExitClass::PhysicalSurfaceExit;
+        }
+        return RunAction::BoundaryExitClass::UnexpectedArtificialExit;
+    }
 }
 
 // --------------------------------------------------------------------
@@ -159,15 +208,12 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
     auto *runAction = fEventAction ? fEventAction->GetRunAction() : nullptr;
     if (runAction && fPrimaryAction)
     {
-        // In streaming mode, PrimaryGeneratorAction may move from one
-        // input CSV to the next during the same Geant4 run.
-        // Make sure the output CSV matches the current input CSV.
         runAction->SwitchOutputCsvForInputPath(fPrimaryAction->GetLoadedInputFile());
     }
 
-    if (runAction && fPrimaryAction && runAction->IsStepCsvOpen())
+    if (runAction && fPrimaryAction && runAction->IsFullMode() && runAction->IsFullStepCsvOpen())
     {
-        std::ofstream &csv = runAction->GetStepCsv();
+        std::ofstream &csv = runAction->GetFullStepCsv();
 
         const auto &rec = fPrimaryAction->GetCurrentRecord();
         const auto &capturePos = fPrimaryAction->GetCurrentLocalCapturePosition();
@@ -182,6 +228,7 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
         }
 
         csv
+            << fPrimaryAction->MakeCurrentPhysicalEventUid() << ","
             << rec.eventID << ","
             << rec.thickness_um << ","
             << rec.bn_wt << ","
@@ -201,6 +248,8 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
             << bnCenter.x() / um << ","
             << bnCenter.y() / um << ","
             << bnCenter.z() / um << ","
+            << fPrimaryAction->GetCurrentAlphaLiReplayIndex() << ","
+            << fPrimaryAction->GetCurrentAlphaLiReplayCount() << ","
             << track->GetTrackID() << ","
             << track->GetCurrentStepNumber() << ","
             << ParticleLabel(track) << ","
@@ -215,13 +264,62 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
             << stepLen / um << ","
             << edep / keV << ","
             << ekinPre / keV << ","
-            << ekinPost / keV
+            << ekinPost / keV << ","
+            << fPrimaryAction->MakeCurrentSourceEventUid() << ","
+            << rec.record_index << ","
+            << fPrimaryAction->GetCurrentTrajectoryWeight()
+            << "\n";
+    }
+    else if (runAction && fEventAction && runAction->IsSlimMode() &&
+             runAction->IsSlimTrackCsvOpen() &&
+             phasePre == "ZnS" && stepLen > 0.0)
+    {
+        std::ofstream &csv = runAction->GetSlimTrackCsv();
+        const auto anchor = fEventAction->MakeCurrentCaptureAnchorRow();
+
+        csv
+            << anchor.physical_event_uid << ","
+            << anchor.source_event_uid << ","
+            << anchor.eventID << ","
+            << anchor.record_index << ","
+            << track->GetTrackID() << ","
+            << track->GetCurrentStepNumber() << ","
+            << ParticleLabel(track) << ","
+            << phasePost << ","
+            << xPre.x() / um << ","
+            << xPre.y() / um << ","
+            << xPre.z() / um << ","
+            << xPost.x() / um << ","
+            << xPost.y() / um << ","
+            << xPost.z() / um << ","
+            << stepLen / um << ","
+            << edep / keV << ","
+            << ekinPre / keV << ","
+            << ekinPost / keV << ","
+            << anchor.alphali_replay_index << ","
+            << anchor.alphali_replay_count << ","
+            << anchor.trajectory_weight
             << "\n";
     }
 
     // Kill track once it exits the microstructure into world/outside
     if (!IsOutsidePhase(phasePre) && IsOutsidePhase(phasePost))
     {
+        if (runAction && fEventAction)
+        {
+            const auto *det = dynamic_cast<const DetectorConstruction *>(
+                G4RunManager::GetRunManager()->GetUserDetectorConstruction());
+            if (det)
+            {
+                const auto anchor = fEventAction->MakeCurrentCaptureAnchorRow();
+                const std::string exitFace = ExitFaceLabel(xPost, det);
+                runAction->RecordBoundaryExit(
+                    anchor,
+                    ParticleLabel(track),
+                    ClassifyBoundaryExit(anchor.surface_mode, exitFace),
+                    ekinPost / keV);
+            }
+        }
         track->SetTrackStatus(fStopAndKill);
     }
 }

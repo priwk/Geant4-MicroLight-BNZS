@@ -6,11 +6,11 @@
 #include "globals.hh"
 
 #include "PrimaryGeneratorAction.hh"
+#include "RunAction.hh"
 
 #include <string>
 
 class G4Event;
-class RunAction;
 class PrimaryGeneratorAction;
 
 class EventAction : public G4UserEventAction
@@ -31,8 +31,11 @@ public:
   const std::string &GetCurrentSurfaceMode() const { return fCurrentSurfaceMode; }
   G4double GetCurrentTargetLocalZ() const { return fCurrentTargetLocalZ; }
   G4double GetCurrentUsedLocalZ() const { return fCurrentUsedLocalZ; }
+  G4int GetCurrentAlphaLiReplayIndex() const { return fCurrentAlphaLiReplayIndex; }
+  G4int GetCurrentAlphaLiReplayCount() const { return fCurrentAlphaLiReplayCount; }
 
   RunAction *GetRunAction() const { return fRunAction; }
+  RunAction::CaptureAnchorRow MakeCurrentCaptureAnchorRow() const;
 
 private:
   RunAction *fRunAction;
@@ -46,6 +49,8 @@ private:
   std::string fCurrentSurfaceMode;
   G4double fCurrentTargetLocalZ;
   G4double fCurrentUsedLocalZ;
+  G4int fCurrentAlphaLiReplayIndex;
+  G4int fCurrentAlphaLiReplayCount;
 };
 
 #endif

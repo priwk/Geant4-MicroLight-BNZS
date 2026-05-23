@@ -8,6 +8,7 @@
 
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class G4Event;
@@ -16,6 +17,7 @@ class AnalysisConfig;
 struct CaptureRecord
 {
   G4int eventID = -1;
+  G4int record_index = -1;
   G4double thickness_um = 0.0;
   G4double bn_wt = 0.0;
   G4double zns_wt = 0.0;
@@ -43,19 +45,33 @@ public:
   const std::string &GetCurrentSurfaceMode() const { return fCurrentSurfaceMode; }
   G4double GetCurrentTargetLocalZ() const { return fCurrentTargetLocalZ; }
   G4double GetCurrentUsedLocalZ() const { return fCurrentUsedLocalZ; }
+  G4int GetCurrentAlphaLiReplayIndex() const { return fCurrentAlphaLiReplayIndex; }
+  G4int GetCurrentAlphaLiReplayCount() const { return fAlphaLiReplayPerCapture; }
+  G4double GetCurrentTrajectoryWeight() const;
+  std::string MakeCurrentPhysicalEventUid() const;
+  std::string MakeCurrentSourceEventUid() const;
   G4int GetTotalLoadedEvents() const { return static_cast<G4int>(fTotalStreamedRecords); }
   const std::string &GetLoadedInputFile() const { return fCurrentInputFile; }
 
 private:
+  using HeaderIndex = std::unordered_map<std::string, std::size_t>;
+
   // ---- input handling ----
   void InitializeInputStreaming();
   std::vector<std::string> FindInputCsvFiles() const;
   G4bool OpenNextInputFile();
   G4bool ReadNextRecord(CaptureRecord &rec);
   G4bool ReadFirstValidRecordFromFile(const std::string &path, CaptureRecord &rec) const;
-  G4bool ParseOneRecordLine(const std::string &line, CaptureRecord &rec) const;
+  G4bool ReadHeaderIndex(std::istream &input, HeaderIndex &headerIndex) const;
+  G4bool ParseOneRecordLine(
+      const std::string &line,
+      const HeaderIndex &headerIndex,
+      G4int fallbackRecordIndex,
+      CaptureRecord &rec) const;
   void ConfigureDetectorFromInput();
   G4bool IsInputThicknessCompatible(G4double thickness_um, G4double localT_um) const;
+  G4int ReadAlphaLiReplayPerCapture() const;
+  G4bool PrepareCurrentCaptureReplayState();
 
   // ---- event classification ----
   std::string DetermineSurfaceMode(const CaptureRecord &rec) const;
@@ -103,11 +119,17 @@ private:
   std::size_t fCurrentFileIndex = 0;
   std::ifstream fCurrentInputStream;
   std::string fCurrentInputFile;
+  HeaderIndex fCurrentHeaderIndex;
+  G4int fCurrentInputRecordCounter = 0;
 
   CaptureRecord fFirstRecordForGeometry;
   G4bool fHasFirstRecordForGeometry = false;
   G4bool fNoMoreInput = false;
   std::size_t fTotalStreamedRecords = 0;
+
+  G4int fAlphaLiReplayPerCapture = 1;
+  G4int fCurrentAlphaLiReplayIndex = 0;
+  G4int fRemainingReplaysForCurrentCapture = 0;
 
   // current event cache
   CaptureRecord fCurrentRecord;

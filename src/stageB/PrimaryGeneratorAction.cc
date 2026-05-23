@@ -22,8 +22,10 @@
 // #include <dirent.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <numeric>
 
@@ -50,6 +52,32 @@ namespace
       tokens.push_back(token);
     }
     return tokens;
+  }
+
+  std::string Trim(const std::string &value)
+  {
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos)
+      return "";
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+  }
+
+  G4int PositiveIntFromEnv(const char *name, G4int fallback)
+  {
+    const char *raw = std::getenv(name);
+    if (raw == nullptr)
+      return fallback;
+
+    try
+    {
+      const G4int value = std::stoi(Trim(raw));
+      return (value > 0) ? value : fallback;
+    }
+    catch (...)
+    {
+      return fallback;
+    }
   }
 
   G4ThreeVector RandomUnitVector()
@@ -79,6 +107,11 @@ namespace
   std::filesystem::path MakeCaptureInputRootDirectoryPath()
   {
     return MakeInputRootDirectoryPath() / "neutron_capture_positions";
+  }
+
+  std::filesystem::path MakeStageACaptureInputRootDirectoryPath()
+  {
+    return MakeInputRootDirectoryPath() / "stageA";
   }
 
   G4bool TryParseRatioFolderName(const std::string &name,
@@ -178,8 +211,8 @@ namespace
     return WeightPartToTagString(bnWt) + "-" + WeightPartToTagString(znsWt);
   }
 
-  const G4double kXYMargin = 7.0 * um;
-  const G4double kZBulkMargin = 7.35 * um;
+  const G4double kXYMargin = 6.8 * um;
+  const G4double kZBulkMargin = 7.4 * um;
 
   G4bool IsInsideSafeXY(const G4ThreeVector &p, const DetectorConstruction *det)
   {
@@ -263,10 +296,15 @@ PrimaryGeneratorAction::PrimaryGeneratorAction(AnalysisConfig *config)
       fCurrentFileIndex(0),
       fCurrentInputStream(),
       fCurrentInputFile(""),
+      fCurrentHeaderIndex(),
+      fCurrentInputRecordCounter(0),
       fFirstRecordForGeometry(),
       fHasFirstRecordForGeometry(false),
       fNoMoreInput(false),
       fTotalStreamedRecords(0),
+      fAlphaLiReplayPerCapture(ReadAlphaLiReplayPerCapture()),
+      fCurrentAlphaLiReplayIndex(0),
+      fRemainingReplaysForCurrentCapture(0),
       fCurrentRecord(),
       fCurrentLocalCapturePosition(),
       fCurrentSelectedBNCenter(),
@@ -343,14 +381,28 @@ std::vector<std::string> PrimaryGeneratorAction::FindInputCsvFiles() const
   }
 
   // Priority 3: preferred new layout, selected by current BN:ZnS ratio
+  // ../Input/stageA/<ratio>/neutron_capture_positions/*.csv
+  // Backward-compatible fallback:
   // ../Input/neutron_capture_positions/<ratio>/*.csv
-  const fs::path captureRoot = MakeCaptureInputRootDirectoryPath();
+  const std::vector<fs::path> captureRoots = {
+      MakeStageACaptureInputRootDirectoryPath(),
+      MakeCaptureInputRootDirectoryPath(),
+  };
 
-  if (fs::exists(captureRoot) && fs::is_directory(captureRoot))
+  for (const auto &captureRoot : captureRoots)
   {
+    if (!fs::exists(captureRoot) || !fs::is_directory(captureRoot))
+    {
+      continue;
+    }
+
     if (fConfig != nullptr)
     {
-      const fs::path ratioDir = captureRoot / MakeRatioFolderName(fConfig->bnWt, fConfig->znsWt);
+      fs::path ratioDir = captureRoot / MakeRatioFolderName(fConfig->bnWt, fConfig->znsWt);
+      if (captureRoot.filename() == "stageA")
+      {
+        ratioDir /= "neutron_capture_positions";
+      }
       auto matches = CollectMatchingCsvFilesInDirectory(ratioDir);
       if (!matches.empty())
       {
@@ -371,10 +423,16 @@ std::vector<std::string> PrimaryGeneratorAction::FindInputCsvFiles() const
       if (!TryParseRatioFolderName(dirName, bnWt, znsWt))
         continue;
 
-      auto matches = CollectMatchingCsvFilesInDirectory(entry.path());
+      fs::path ratioDir = entry.path();
+      if (captureRoot.filename() == "stageA")
+      {
+        ratioDir /= "neutron_capture_positions";
+      }
+
+      auto matches = CollectMatchingCsvFilesInDirectory(ratioDir);
       if (!matches.empty())
       {
-        candidateRatioDirs.push_back(entry.path());
+        candidateRatioDirs.push_back(ratioDir);
       }
     }
 
@@ -405,36 +463,98 @@ std::vector<std::string> PrimaryGeneratorAction::FindInputCsvFiles() const
   {
     G4Exception("PrimaryGeneratorAction::FindInputCsvFiles",
                 "BNZS002", FatalException,
-                ("No *_neutron_capture_positions.csv found in either " + MakeCaptureInputRootDirectoryPath().string() + " or " + inputDir.string()).c_str());
+                ("No *_neutron_capture_positions.csv found in " +
+                 MakeStageACaptureInputRootDirectoryPath().string() + ", " +
+                 MakeCaptureInputRootDirectoryPath().string() + ", or " +
+                 inputDir.string())
+                    .c_str());
     return {};
   }
 
   return matches;
 }
 
-// --------------------------------------------------------------------
+G4bool PrimaryGeneratorAction::ReadHeaderIndex(std::istream &input, HeaderIndex &headerIndex) const
+{
+  std::string headerLine;
+  if (!std::getline(input, headerLine))
+    return false;
 
-G4bool PrimaryGeneratorAction::ParseOneRecordLine(const std::string &line, CaptureRecord &rec) const
+  headerIndex.clear();
+  const auto headers = SplitFlexible(headerLine);
+  for (std::size_t i = 0; i < headers.size(); ++i)
+  {
+    headerIndex[Trim(headers[i])] = i;
+  }
+
+  return !headerIndex.empty();
+}
+
+G4bool PrimaryGeneratorAction::ParseOneRecordLine(
+    const std::string &line,
+    const HeaderIndex &headerIndex,
+    G4int fallbackRecordIndex,
+    CaptureRecord &rec) const
 {
   const auto tokens = SplitFlexible(line);
-  if (tokens.size() < 9)
+
+  auto field = [&](const std::string &name) -> std::string
+  {
+    const auto it = headerIndex.find(name);
+    if (it == headerIndex.end() || it->second >= tokens.size())
+      return "";
+    return Trim(tokens[it->second]);
+  };
+
+  const std::string eventID = field("eventID");
+  const std::string thickness = field("thickness_um");
+  const std::string bnWt = field("bn_wt");
+  const std::string znsWt = field("zns_wt");
+  const std::string captureX = field("capture_x_um");
+  const std::string captureY = field("capture_y_um");
+  const std::string corrX = field("corr_x_um");
+  const std::string corrY = field("corr_y_um");
+  const std::string depth = field("depth_um");
+
+  if (eventID.empty() || thickness.empty() || bnWt.empty() || znsWt.empty() ||
+      captureX.empty() || captureY.empty() || corrX.empty() || corrY.empty() ||
+      depth.empty())
+  {
     return false;
+  }
 
   try
   {
-    rec.eventID = std::stoi(tokens[0]);
-    rec.thickness_um = std::stod(tokens[1]);
-    rec.bn_wt = std::stod(tokens[2]);
-    rec.zns_wt = std::stod(tokens[3]);
-    rec.capture_x_um = std::stod(tokens[4]);
-    rec.capture_y_um = std::stod(tokens[5]);
-    rec.corr_x_um = std::stod(tokens[6]);
-    rec.corr_y_um = std::stod(tokens[7]);
-    rec.depth_um = std::stod(tokens[8]);
+    rec.eventID = std::stoi(eventID);
+    rec.thickness_um = std::stod(thickness);
+    rec.bn_wt = std::stod(bnWt);
+    rec.zns_wt = std::stod(znsWt);
+    rec.capture_x_um = std::stod(captureX);
+    rec.capture_y_um = std::stod(captureY);
+    rec.corr_x_um = std::stod(corrX);
+    rec.corr_y_um = std::stod(corrY);
+    rec.depth_um = std::stod(depth);
   }
   catch (...)
   {
     return false;
+  }
+
+  const std::string recordIndex = field("record_index");
+  if (!recordIndex.empty())
+  {
+    try
+    {
+      rec.record_index = std::stoi(recordIndex);
+    }
+    catch (...)
+    {
+      rec.record_index = fallbackRecordIndex;
+    }
+  }
+  else
+  {
+    rec.record_index = fallbackRecordIndex;
   }
 
   return true;
@@ -449,21 +569,23 @@ G4bool PrimaryGeneratorAction::ReadFirstValidRecordFromFile(
   if (!fin)
     return false;
 
-  std::string line;
-
-  // skip header
-  if (!std::getline(fin, line))
+  HeaderIndex headerIndex;
+  if (!ReadHeaderIndex(fin, headerIndex))
     return false;
 
+  std::string line;
+  G4int fallbackRecordIndex = 0;
   while (std::getline(fin, line))
   {
     if (line.empty())
       continue;
 
-    if (ParseOneRecordLine(line, rec))
+    if (ParseOneRecordLine(line, headerIndex, fallbackRecordIndex, rec))
     {
       return true;
     }
+
+    ++fallbackRecordIndex;
   }
 
   return false;
@@ -486,12 +608,13 @@ G4bool PrimaryGeneratorAction::OpenNextInputFile()
       continue;
     }
 
-    std::string header;
-    if (!std::getline(fCurrentInputStream, header))
+    if (!ReadHeaderIndex(fCurrentInputStream, fCurrentHeaderIndex))
     {
       fCurrentInputStream.close();
       continue;
     }
+
+    fCurrentInputRecordCounter = 0;
 
     G4cout << "[PrimaryGeneratorAction] Open input CSV: "
            << fCurrentInputFile << G4endl;
@@ -521,11 +644,18 @@ G4bool PrimaryGeneratorAction::ReadNextRecord(CaptureRecord &rec)
       if (line.empty())
         continue;
 
-      if (ParseOneRecordLine(line, rec))
+      if (ParseOneRecordLine(
+              line,
+              fCurrentHeaderIndex,
+              fCurrentInputRecordCounter,
+              rec))
       {
         ++fTotalStreamedRecords;
+        ++fCurrentInputRecordCounter;
         return true;
       }
+
+      ++fCurrentInputRecordCounter;
     }
 
     fCurrentInputStream.close();
@@ -540,6 +670,10 @@ void PrimaryGeneratorAction::InitializeInputStreaming()
   fNoMoreInput = false;
   fTotalStreamedRecords = 0;
   fHasFirstRecordForGeometry = false;
+  fCurrentHeaderIndex.clear();
+  fCurrentInputRecordCounter = 0;
+  fCurrentAlphaLiReplayIndex = 0;
+  fRemainingReplaysForCurrentCapture = 0;
 
   if (candidateInputFiles.empty())
   {
@@ -675,6 +809,126 @@ G4bool PrimaryGeneratorAction::IsInputThicknessCompatible(
   }
 
   return (thickness_um > localT_um + tol);
+}
+
+// --------------------------------------------------------------------
+
+G4int PrimaryGeneratorAction::ReadAlphaLiReplayPerCapture() const
+{
+  return PositiveIntFromEnv("BNZS_ALPHALI_REPLAY_PER_CAPTURE", 1);
+}
+
+G4bool PrimaryGeneratorAction::PrepareCurrentCaptureReplayState()
+{
+  CaptureRecord rec;
+  if (!ReadNextRecord(rec))
+  {
+    return false;
+  }
+
+  fCurrentRecord = rec;
+  fCurrentSurfaceMode = DetermineSurfaceMode(fCurrentRecord);
+  fCurrentTargetLocalZ = DetermineTargetLocalZ(fCurrentRecord, fCurrentSurfaceMode);
+
+  const auto *det = dynamic_cast<const DetectorConstruction *>(
+      G4RunManager::GetRunManager()->GetUserDetectorConstruction());
+
+  G4ThreeVector chosenCenter;
+  G4double usedZ = 0.0;
+  G4bool usedFallback = false;
+
+  if (fCurrentSurfaceMode == "bulk")
+  {
+    if (!SampleBulkCapturePoint(chosenCenter, fCurrentLocalCapturePosition, usedFallback))
+    {
+      G4Exception("PrimaryGeneratorAction::PrepareCurrentCaptureReplayState",
+                  "BNZS008", FatalException,
+                  "Failed to sample a safe bulk BN capture point.");
+      return false;
+    }
+
+    usedZ = fCurrentLocalCapturePosition.z();
+    fCurrentTargetLocalZ = usedZ;
+  }
+  else
+  {
+    if (!SelectBNSphereForTargetZ(
+            fCurrentTargetLocalZ,
+            chosenCenter,
+            usedZ,
+            usedFallback))
+    {
+      G4Exception("PrimaryGeneratorAction::PrepareCurrentCaptureReplayState",
+                  "BNZS008", FatalException,
+                  "Failed to find any BN sphere for current surface capture event.");
+      return false;
+    }
+
+    if (!SampleSafePointInSphereSlice(
+            chosenCenter,
+            usedZ,
+            det->GetBNRadius(),
+            fCurrentLocalCapturePosition))
+    {
+      G4Exception("PrimaryGeneratorAction::PrepareCurrentCaptureReplayState",
+                  "BNZS010", FatalException,
+                  "Failed to sample a surface capture point inside the XY safety window.");
+      return false;
+    }
+  }
+
+  fCurrentSelectedBNCenter = chosenCenter;
+  fCurrentUsedLocalZ = usedZ;
+  fCurrentAlphaLiReplayIndex = 0;
+  fRemainingReplaysForCurrentCapture = fAlphaLiReplayPerCapture;
+
+  const G4int geantEventID = G4RunManager::GetRunManager()->GetCurrentEvent()
+                                 ? G4RunManager::GetRunManager()->GetCurrentEvent()->GetEventID()
+                                 : -1;
+  if (geantEventID >= 0 && geantEventID < 5)
+  {
+    G4cout
+        << "\n[PrimaryGeneratorAction] Event " << geantEventID
+        << "\n  input eventID      = " << fCurrentRecord.eventID
+        << "\n  record index       = " << fCurrentRecord.record_index
+        << "\n  mode               = " << fCurrentSurfaceMode
+        << "\n  target z           = " << fCurrentTargetLocalZ / um << " um"
+        << "\n  used z             = " << fCurrentUsedLocalZ / um << " um"
+        << "\n  selected BN center = (" << fCurrentSelectedBNCenter.x() / um
+        << ", " << fCurrentSelectedBNCenter.y() / um
+        << ", " << fCurrentSelectedBNCenter.z() / um << ") um"
+        << "\n  capture point      = (" << fCurrentLocalCapturePosition.x() / um
+        << ", " << fCurrentLocalCapturePosition.y() / um
+        << ", " << fCurrentLocalCapturePosition.z() / um << ") um"
+        << "\n  replay count       = " << fAlphaLiReplayPerCapture
+        << "\n  fallback used      = " << (usedFallback ? "yes" : "no")
+        << G4endl;
+  }
+
+  return true;
+}
+
+std::string PrimaryGeneratorAction::MakeCurrentSourceEventUid() const
+{
+  std::ostringstream oss;
+  oss << MakeCurrentPhysicalEventUid() << "_"
+      << fCurrentAlphaLiReplayIndex;
+  return oss.str();
+}
+
+G4double PrimaryGeneratorAction::GetCurrentTrajectoryWeight() const
+{
+  return (fAlphaLiReplayPerCapture > 0)
+             ? (1.0 / static_cast<G4double>(fAlphaLiReplayPerCapture))
+             : 1.0;
+}
+
+std::string PrimaryGeneratorAction::MakeCurrentPhysicalEventUid() const
+{
+  std::ostringstream oss;
+  oss << fCurrentRecord.eventID << "_"
+      << fCurrentRecord.record_index;
+  return oss.str();
 }
 
 // --------------------------------------------------------------------
@@ -1030,70 +1284,21 @@ void PrimaryGeneratorAction::GeneratePrimaries(G4Event *event)
 {
   const G4int geantEventID = event->GetEventID();
 
-  CaptureRecord rec;
-  if (!ReadNextRecord(rec))
+  if (fRemainingReplaysForCurrentCapture <= 0)
   {
-    G4cout
-        << "[PrimaryGeneratorAction] No more input capture records. "
-        << "Aborting run at Geant4 event " << geantEventID << G4endl;
-
-    G4RunManager::GetRunManager()->AbortRun(true);
-    return;
-  }
-
-  fCurrentRecord = rec;
-  fCurrentSurfaceMode = DetermineSurfaceMode(fCurrentRecord);
-  fCurrentTargetLocalZ = DetermineTargetLocalZ(fCurrentRecord, fCurrentSurfaceMode);
-
-  const auto *det = dynamic_cast<const DetectorConstruction *>(
-      G4RunManager::GetRunManager()->GetUserDetectorConstruction());
-
-  G4ThreeVector chosenCenter;
-  G4double usedZ = 0.0;
-  G4bool usedFallback = false;
-
-  if (fCurrentSurfaceMode == "bulk")
-  {
-    if (!SampleBulkCapturePoint(chosenCenter, fCurrentLocalCapturePosition, usedFallback))
+    if (!PrepareCurrentCaptureReplayState())
     {
-      G4Exception("PrimaryGeneratorAction::GeneratePrimaries",
-                  "BNZS008", FatalException,
-                  "Failed to sample a safe bulk BN capture point.");
-      return;
-    }
+      G4cout
+          << "[PrimaryGeneratorAction] No more input capture records. "
+          << "Aborting run at Geant4 event " << geantEventID << G4endl;
 
-    usedZ = fCurrentLocalCapturePosition.z();
-    fCurrentTargetLocalZ = usedZ;
-  }
-  else
-  {
-    if (!SelectBNSphereForTargetZ(
-            fCurrentTargetLocalZ,
-            chosenCenter,
-            usedZ,
-            usedFallback))
-    {
-      G4Exception("PrimaryGeneratorAction::GeneratePrimaries",
-                  "BNZS008", FatalException,
-                  "Failed to find any BN sphere for current surface capture event.");
-      return;
-    }
-
-    if (!SampleSafePointInSphereSlice(
-            chosenCenter,
-            usedZ,
-            det->GetBNRadius(),
-            fCurrentLocalCapturePosition))
-    {
-      G4Exception("PrimaryGeneratorAction::GeneratePrimaries",
-                  "BNZS010", FatalException,
-                  "Failed to sample a surface capture point inside the XY safety window.");
+      G4RunManager::GetRunManager()->AbortRun(true);
       return;
     }
   }
 
-  fCurrentSelectedBNCenter = chosenCenter;
-  fCurrentUsedLocalZ = usedZ;
+  fCurrentAlphaLiReplayIndex =
+      std::max(0, fAlphaLiReplayPerCapture - fRemainingReplaysForCurrentCapture);
 
   // choose branch
   const G4bool useGroundStateBranch = (G4UniformRand() < 0.063);
@@ -1103,11 +1308,16 @@ void PrimaryGeneratorAction::GeneratePrimaries(G4Event *event)
       fCurrentLocalCapturePosition,
       useGroundStateBranch);
 
+  --fRemainingReplaysForCurrentCapture;
+
   if (geantEventID < 5)
   {
     G4cout
         << "\n[PrimaryGeneratorAction] Event " << geantEventID
         << "\n  input eventID      = " << fCurrentRecord.eventID
+        << "\n  record index       = " << fCurrentRecord.record_index
+        << "\n  replay index       = " << fCurrentAlphaLiReplayIndex
+        << "\n  replay count       = " << fAlphaLiReplayPerCapture
         << "\n  mode               = " << fCurrentSurfaceMode
         << "\n  target z           = " << fCurrentTargetLocalZ / um << " um"
         << "\n  used z             = " << fCurrentUsedLocalZ / um << " um"
@@ -1117,7 +1327,6 @@ void PrimaryGeneratorAction::GeneratePrimaries(G4Event *event)
         << "\n  capture point      = (" << fCurrentLocalCapturePosition.x() / um
         << ", " << fCurrentLocalCapturePosition.y() / um
         << ", " << fCurrentLocalCapturePosition.z() / um << ") um"
-        << "\n  fallback used      = " << (usedFallback ? "yes" : "no")
         << G4endl;
   }
 }

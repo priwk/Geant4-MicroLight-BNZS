@@ -140,14 +140,28 @@ python3 scripts/calibrate_optical_params_with_Leff.py \
 
 ## Stage C ZnS 源提取
 
-在不修改原始 `alpha_li_steps.csv` 文件的前提下，从现有 Stage B step 文件生成派生的闪烁源表：
+`stageC_make_zns_sources.py` 现在支持两类 Stage B 输入：
+
+- 推荐的 slim 生产输出：
+  `*_capture_anchors.csv` + `*_zns_track_steps.csv`
+- 兼容调试用的 full 输出：
+  `*_alpha_li_steps.csv`
+
+脚本会把 Stage B 的 alpha/Li 轨迹转换成 Stage C 或外部光学 Monte Carlo 可直接使用的 ZnS 源表：
 
 ```bash
 python3 stageC_make_zns_sources.py
 ```
 
 脚本会提示输入配比目录，例如 `1-1`、`1-1.5` 或 `1-2`，以及厚度范围，例如 `30-200`。
-它会扫描：
+它会优先扫描：
+
+```text
+Output/stageB/<ratio_tag>/*_capture_anchors.csv
+Output/stageB/<ratio_tag>/*_zns_track_steps.csv
+```
+
+若某个厚度没有 slim 文件对，则回退扫描：
 
 ```text
 Output/stageB/<ratio_tag>/*_alpha_li_steps.csv
@@ -167,9 +181,19 @@ Input/alpha_li_steps/<ratio_tag>/<thickness>_event_light_sources.csv
 后续 Stage C 跟踪默认使用的光学源模型，是沿每个保留的 pre-to-post step 线段做均匀采样；
 派生 step 表中的中点坐标只是调试字段。
 
-`event_light_sources.csv` 基于所有 Stage B 俘获事件构建，再与 ZnS step 汇总结果做左连接。
-即使某次俘获没有 ZnS 能量沉积，也会保留下来，并令 `n_photon0 = 0`，
-从而避免每次俘获的平均发光量偏向非零发光事件。
+在 slim 模式下：
+
+- `capture_anchors.csv` 的每一行代表一条 alpha/Li 轨迹样本
+- `physical_event_uid = eventID_record_index`
+- `source_event_uid = eventID_record_index_replayIndex`
+- `trajectory_weight = 1 / alphali_replay_count`
+
+`event_light_sources.csv` 基于所有 Stage B trajectory anchor 构建，再与 ZnS step 汇总结果做左连接。
+即使某条 trajectory 没有 ZnS 能量沉积，也会保留下来，并令 `n_photon0 = 0`，
+从而避免平均发光量偏向非零发光 trajectory。
+
+`phase_pre == "ZnS"` 的 step 才会被视为 ZnS 潜在发光轨迹；
+`phase_post` 只作为边界/跨相位诊断元数据保留。
 
 可选的闪烁与 Birks 参数：
 
@@ -187,6 +211,11 @@ python3 stageC_make_zns_sources.py \
   --thickness-range 500-500 \
   --split-by-placement
 ```
+
+注意：当前 `--split-by-placement` 仍用于 legacy full 输入
+`*_alpha_li_steps.csv` 的拆分流程。
+slim 输出当前主要面向后处理或外部光学 MC，
+以及不拆分排布的 `stageC_make_zns_sources.py` 批量转换流程。
 
 拆分模式会写出类似下面的文件：
 
@@ -364,16 +393,16 @@ python3 stageC_run_thickness_batch.py \
 
 ## Stage B 平衡 alpha/Li 回放批处理
 
-Stage B 从以下位置读取俘获记录：
+Stage B 现在默认优先从以下位置读取俘获记录：
+
+```text
+Input/stageA/<ratio>/neutron_capture_positions/*_neutron_capture_positions.csv
+```
+
+向后兼容的旧路径仍保留为回退：
 
 ```text
 Input/neutron_capture_positions/<ratio>/*_neutron_capture_positions.csv
-```
-
-例如，`1-2` 配比使用：
-
-```text
-Input/neutron_capture_positions/1-2
 ```
 
 使用平衡的排布轮转方式运行所有配比目录：
@@ -395,13 +424,52 @@ Input/placements/<ratio>/*.csv
 ```
 
 每次 `Geant4-MicroLight-BNZS` 调用只使用一个固定排布和一个临时俘获分块，因此 Geant4 单次运行期间几何体不会变化。
-默认回放倍数为 1。如果要在额外的旋转排布分配上重复回放同一批已打乱的俘获记录：
+
+这里有两种不同的“重复”语义：
+
+1. `STAGEB_REPLAY_MULTIPLIER`
+   让同一批 capture records 以不同的排布轮转方式重复批处理分配。
+2. `BNZS_ALPHALI_REPLAY_PER_CAPTURE`
+   对每个物理中子俘获点，在同一个 `local_capture_x/y/z` 上重复发射 `N` 次 alpha/Li，
+   每次重新随机反应分支与发射方向。
+
+如果要在额外的旋转排布分配上重复回放同一批已打乱的俘获记录：
 
 ```bash
 STAGEB_REPLAY_MULTIPLIER=3 bash batch_run.sh 1-2
 ```
 
-输出会按配比和厚度写入：
+如果要对每个俘获点做两次条件 alpha/Li trajectory 采样：
+
+```bash
+BNZS_ALPHALI_REPLAY_PER_CAPTURE=2 bash batch_run.sh 1-2
+```
+
+推荐的生产模式输出：
+
+```bash
+BNZS_STAGEB_OUTPUT_MODE=slim bash batch_run.sh 1-2
+```
+
+slim 模式会按配比和厚度写入：
+
+```text
+Output/stageB/<ratio>/<thickness>_capture_anchors.csv
+Output/stageB/<ratio>/<thickness>_zns_track_steps.csv
+Output/stageB/<ratio>/<thickness>_boundary_stop_summary.csv
+```
+
+其中：
+
+- `physical_event_uid = eventID_record_index`
+- `source_event_uid = eventID_record_index_replayIndex`
+- `trajectory_weight = 1 / alphali_replay_count`
+
+`capture_anchors.csv` 保留所有 replay trajectory，
+即使某条 trajectory 没有任何 ZnS step；
+`zns_track_steps.csv` 只保留 `phase_pre == "ZnS"` 且 `step_len_um > 0` 的 alpha/Li 轨迹段。
+
+legacy 调试模式 `BNZS_STAGEB_OUTPUT_MODE=full` 仍会输出：
 
 ```text
 Output/stageB/<ratio>/<thickness>_alpha_li_steps.csv
@@ -418,7 +486,9 @@ Output/stageB/1-2/400_m01_p0001_placement_f_0.64_0001_alpha_li_steps.csv
 并且这些分块文件默认会被删除：
 
 ```text
-Output/stageB/1-2/400_alpha_li_steps.csv
+Output/stageB/<ratio>/<thickness>_capture_anchors.csv
+Output/stageB/<ratio>/<thickness>_zns_track_steps.csv
+Output/stageB/<ratio>/<thickness>_boundary_stop_summary.csv
 ```
 
 如需保留分块输出以便调试：
@@ -437,7 +507,7 @@ Stage B 会记录真实的局部 alpha/Li 生成点：
 `local_capture_x_um`、`local_capture_y_um` 和 `local_capture_z_um`，
 以及该次运行使用的 `placement_file`。
 表面俘获会保留从宏观前后表面距离到局部 RVE z 切片的映射。
-体内俘获会将 `depth_um` 作为元数据保留，并在带有 7 um 的 XY 和 z 安全边距的块体 BN 体积中采样局部俘获点。
+体内俘获会将 `depth_um` 作为元数据保留，并在带有 `6.8 um` XY 安全边距和 `7.4 um` z 安全边距的块体 BN 体积中采样局部俘获点。
 
 日志文件会包含配比和排布基础名：
 
@@ -450,12 +520,12 @@ logs/stageB/balanced/<ratio>/<thickness>/mXX/pYYYY_<placement>.log
 如果你想基于当前代码重新生成一套完整的 `Stage B` 与 `Stage C` 数据，
 推荐按下面的顺序执行：
 
-1. 先重跑 `Stage B`，生成新的 `Output/stageB/<ratio>/*_alpha_li_steps.csv`
+1. 先重跑 `Stage B`，推荐生成新的 slim 输出
 2. 再用新的 `Stage B` 输出重建 `Stage C` 源表
 3. 再运行 `Stage C Optical RVE`
 4. 最后做 `Stage C` 宏观耦合曲线
 
-这样可以避免继续沿用旧的 `alpha_li_steps.csv`、旧的拆分光学源表，
+这样可以避免继续沿用旧的 `alpha_li_steps.csv`、旧的 slim/full 混合结果、旧的拆分光学源表，
 或者把新旧结果混在一起。
 
 ### 0. 建议先清理或备份旧结果
@@ -520,14 +590,16 @@ STAGEB_SHUFFLE_SEED=20260427 bash batch_run.sh 1-2
 `Stage B` 主要输入目录：
 
 ```text
-Input/neutron_capture_positions/<ratio>/*_neutron_capture_positions.csv
+Input/stageA/<ratio>/neutron_capture_positions/*_neutron_capture_positions.csv
 Input/placements/<ratio>/*.csv
 ```
 
 `Stage B` 主要输出目录：
 
 ```text
-Output/stageB/<ratio>/<thickness>_alpha_li_steps.csv
+Output/stageB/<ratio>/<thickness>_capture_anchors.csv
+Output/stageB/<ratio>/<thickness>_zns_track_steps.csv
+Output/stageB/<ratio>/<thickness>_boundary_stop_summary.csv
 logs/stageB/balanced/<ratio>/<thickness>/mXX/pYYYY_<placement>.log
 ```
 
@@ -557,10 +629,42 @@ python3 stageB_balanced_cycle.py \
 - `--merge-only`：只合并已有分块，不重新运行 Geant4
 - `--dry-run`：打印将执行的运行配置，不真正调用 `Geant4-MicroLight-BNZS`
 
+常用环境变量：
+
+- `BNZS_STAGEB_OUTPUT_MODE=slim`
+  推荐生产输出模式
+- `BNZS_ALPHALI_REPLAY_PER_CAPTURE=2`
+  对同一物理俘获点做两次 alpha/Li 条件 trajectory 采样
+- `STAGEB_THICKNESSES=30,40,...`
+  只处理指定厚度的 capture CSV
+
+推荐的生产运行示例：
+
+```bash
+STAGEB_THICKNESSES=30,40,50,70,100,125,150,175,200,225,250,275,300,325,350,375,400,500,700,1000 \
+BNZS_STAGEB_OUTPUT_MODE=slim \
+bash batch_run.sh 1-2
+```
+
+如果希望对每个物理中子俘获点做两次 alpha/Li 条件 trajectory 采样：
+
+```bash
+STAGEB_THICKNESSES=30,40,50,70,100,125,150,175,200,225,250,275,300,325,350,375,400,500,700,1000 \
+BNZS_STAGEB_OUTPUT_MODE=slim \
+BNZS_ALPHALI_REPLAY_PER_CAPTURE=2 \
+bash batch_run.sh 1-2
+```
+
+批处理脚本会为每个临时分块自动生成匹配的 `/run/beamOn` 数量：
+
+```text
+beamOn = capture records in chunk × BNZS_ALPHALI_REPLAY_PER_CAPTURE
+```
+
 ### 2. 用新的 Stage B 输出重建 Stage C 源表
 
-`Stage C` 的局部光学输入不是直接读 `Stage B` 的 `alpha_li_steps.csv`，
-而是先经过 `stageC_make_zns_sources.py` 转成两类派生源表：
+`Stage C` 的局部光学输入不是直接读光学光子，
+而是先经过 `stageC_make_zns_sources.py` 把 Stage B 的 trajectory 输出转成两类派生源表：
 
 ```text
 Input/alpha_li_steps/<ratio>/<thickness>_zns_step_sources.csv
