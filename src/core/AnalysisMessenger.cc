@@ -74,6 +74,20 @@ namespace
       return "same_phase_rho_over_R";
     if (value == "same_phase_random" || value == "samephaserandom")
       return "same_phase_random";
+    if (value == "state_matched" || value == "statematched")
+      return "state_matched";
+    return "";
+  }
+
+  std::string NormalizeStageDParticleReentryMode(const std::string &raw)
+  {
+    const std::string value = ToLowerCopy(Trim(raw));
+    if (value == "sphere_q_mu" || value == "sphereqmu")
+      return "sphere_q_mu";
+    if (value == "same_phase_rho_over_r" || value == "samephaserhooverr")
+      return "same_phase_rho_over_R";
+    if (value == "same_phase_random" || value == "samephaserandom")
+      return "same_phase_random";
     return "";
   }
 
@@ -82,8 +96,12 @@ namespace
     const std::string value = ToLowerCopy(Trim(raw));
     if (value == "random_matrix" || value == "randommatrix")
       return "random_matrix";
+    if (value == "random_matrix_debug" || value == "randommatrixdebug")
+      return "random_matrix_debug";
     if (value == "distance_matched_matrix" || value == "distancematchedmatrix")
       return "distance_matched_matrix";
+    if (value == "clearance_binned_portal" || value == "clearancebinnedportal")
+      return "clearance_binned_portal";
     return "";
   }
 
@@ -355,12 +373,17 @@ AnalysisMessenger::AnalysisMessenger(AnalysisConfig *config)
   fStageDBoundaryModeCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
   fStageDReentryModeCmd = new G4UIcmdWithAString("/cfg/stageD/setReentryMode", this);
-  fStageDReentryModeCmd->SetGuidance("Set Stage D same-phase sphere re-entry mode: same_phase_rho_over_R | same_phase_random.");
+  fStageDReentryModeCmd->SetGuidance("Set Stage D re-entry family mode: state_matched | same_phase_rho_over_R | same_phase_random.");
   fStageDReentryModeCmd->SetParameterName("reentryMode", false);
   fStageDReentryModeCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
+  fStageDParticleReentryModeCmd = new G4UIcmdWithAString("/cfg/stageD/setParticleReentryMode", this);
+  fStageDParticleReentryModeCmd->SetGuidance("Set Stage D particle re-entry mode: sphere_q_mu | same_phase_rho_over_R | same_phase_random.");
+  fStageDParticleReentryModeCmd->SetParameterName("particleReentryMode", false);
+  fStageDParticleReentryModeCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
   fStageDMatrixReentryModeCmd = new G4UIcmdWithAString("/cfg/stageD/setMatrixReentryMode", this);
-  fStageDMatrixReentryModeCmd->SetGuidance("Set Stage D matrix re-entry mode: random_matrix | distance_matched_matrix.");
+  fStageDMatrixReentryModeCmd->SetGuidance("Set Stage D matrix re-entry mode: clearance_binned_portal | random_matrix_debug | distance_matched_matrix.");
   fStageDMatrixReentryModeCmd->SetParameterName("matrixReentryMode", false);
   fStageDMatrixReentryModeCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
@@ -406,6 +429,45 @@ AnalysisMessenger::AnalysisMessenger(AnalysisConfig *config)
   fStageDOutputDirCmd->SetGuidance("Override Stage D output directory.");
   fStageDOutputDirCmd->SetParameterName("outputDir", false);
   fStageDOutputDirCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDPortalNuCmd = new G4UIcmdWithAnInteger("/cfg/stageD/setPortalNu", this);
+  fStageDPortalNuCmd->SetGuidance("Set Stage D virtual portal sampling count along face U.");
+  fStageDPortalNuCmd->SetParameterName("portalNu", false);
+  fStageDPortalNuCmd->SetRange("portalNu>0");
+  fStageDPortalNuCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDPortalNvCmd = new G4UIcmdWithAnInteger("/cfg/stageD/setPortalNv", this);
+  fStageDPortalNvCmd->SetGuidance("Set Stage D virtual portal sampling count along face V.");
+  fStageDPortalNvCmd->SetParameterName("portalNv", false);
+  fStageDPortalNvCmd->SetRange("portalNv>0");
+  fStageDPortalNvCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDPortalMarginUmCmd = new G4UIcmdWithADouble("/cfg/stageD/setPortalMarginUm", this);
+  fStageDPortalMarginUmCmd->SetGuidance("Set Stage D portal virtual box margin in um. Use <=0 to auto-pick max particle radius.");
+  fStageDPortalMarginUmCmd->SetParameterName("portalMarginUm", false);
+  fStageDPortalMarginUmCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDClearanceBinEdgesCmd = new G4UIcommand("/cfg/stageD/setClearanceBinEdgesUm", this);
+  fStageDClearanceBinEdgesCmd->SetGuidance("Set Stage D matrix clearance bin edges in um: edge0 edge1 edge2.");
+  auto *clearance0 = new G4UIparameter("edge0Um", 'd', false);
+  auto *clearance1 = new G4UIparameter("edge1Um", 'd', false);
+  auto *clearance2 = new G4UIparameter("edge2Um", 'd', false);
+  fStageDClearanceBinEdgesCmd->SetParameter(clearance0);
+  fStageDClearanceBinEdgesCmd->SetParameter(clearance1);
+  fStageDClearanceBinEdgesCmd->SetParameter(clearance2);
+  fStageDClearanceBinEdgesCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDMaxParticleReentryTrialsCmd = new G4UIcmdWithAnInteger("/cfg/stageD/setMaxParticleReentryTrials", this);
+  fStageDMaxParticleReentryTrialsCmd->SetGuidance("Set Stage D maximum trials for particle q/mu same-phase re-entry.");
+  fStageDMaxParticleReentryTrialsCmd->SetParameterName("maxTrials", false);
+  fStageDMaxParticleReentryTrialsCmd->SetRange("maxTrials>0");
+  fStageDMaxParticleReentryTrialsCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
+
+  fStageDMaxPortalFallbackLevelCmd = new G4UIcmdWithAnInteger("/cfg/stageD/setMaxPortalFallbackLevel", this);
+  fStageDMaxPortalFallbackLevelCmd->SetGuidance("Set Stage D matrix portal fallback depth: 0..4.");
+  fStageDMaxPortalFallbackLevelCmd->SetParameterName("maxPortalFallbackLevel", false);
+  fStageDMaxPortalFallbackLevelCmd->SetRange("maxPortalFallbackLevel>=0");
+  fStageDMaxPortalFallbackLevelCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
   fOpticalSamplesPerStepCmd = new G4UIcommand("/cfg/setSamplePhotonsPerStep", this);
   fOpticalSamplesPerStepCmd->SetGuidance("Set Stage C sampled optical photons per ZnS step.");
@@ -456,11 +518,18 @@ AnalysisMessenger::~AnalysisMessenger()
   delete fOpticalSamplesPerStepCmd;
   delete fWriteStageCPhotonCsvCmd;
   delete fStageDOutputDirCmd;
+  delete fStageDMaxPortalFallbackLevelCmd;
+  delete fStageDMaxParticleReentryTrialsCmd;
+  delete fStageDClearanceBinEdgesCmd;
+  delete fStageDPortalMarginUmCmd;
+  delete fStageDPortalNvCmd;
+  delete fStageDPortalNuCmd;
   delete fStageDMaxPathLengthUmCmd;
   delete fStageDMaxStepsCmd;
   delete fStageDMaxReentryCmd;
   delete fStageDThetaThresholdDegCmd;
   delete fStageDMatrixReentryModeCmd;
+  delete fStageDParticleReentryModeCmd;
   delete fStageDReentryModeCmd;
   delete fStageDBoundaryModeCmd;
   delete fStageDSourceModeCmd;
@@ -695,12 +764,30 @@ void AnalysisMessenger::SetNewValue(G4UIcommand *command, G4String newValue)
     {
       G4Exception("AnalysisMessenger::SetNewValue",
                   "BNZS_CFG_011", FatalException,
-                  "Stage D reentryMode must be same_phase_rho_over_R or same_phase_random.");
+                  "Stage D reentryMode must be state_matched, same_phase_rho_over_R, or same_phase_random.");
       return;
     }
     fConfig->stageD_reentry_mode = normalized;
+    if (normalized == "state_matched")
+      fConfig->stageD_particle_reentry_mode = "sphere_q_mu";
     G4cout << "[AnalysisMessenger] stageD_reentry_mode set to "
            << fConfig->stageD_reentry_mode
+           << G4endl;
+    return;
+  }
+  if (command == fStageDParticleReentryModeCmd)
+  {
+    const std::string normalized = NormalizeStageDParticleReentryMode(newValue);
+    if (normalized.empty())
+    {
+      G4Exception("AnalysisMessenger::SetNewValue",
+                  "BNZS_CFG_011A", FatalException,
+                  "Stage D particleReentryMode must be sphere_q_mu, same_phase_rho_over_R, or same_phase_random.");
+      return;
+    }
+    fConfig->stageD_particle_reentry_mode = normalized;
+    G4cout << "[AnalysisMessenger] stageD_particle_reentry_mode set to "
+           << fConfig->stageD_particle_reentry_mode
            << G4endl;
     return;
   }
@@ -711,7 +798,7 @@ void AnalysisMessenger::SetNewValue(G4UIcommand *command, G4String newValue)
     {
       G4Exception("AnalysisMessenger::SetNewValue",
                   "BNZS_CFG_012", FatalException,
-                  "Stage D matrixReentryMode must be random_matrix or distance_matched_matrix.");
+                  "Stage D matrixReentryMode must be clearance_binned_portal, random_matrix_debug, random_matrix, or distance_matched_matrix.");
       return;
     }
     fConfig->stageD_matrix_reentry_mode = normalized;
@@ -786,6 +873,71 @@ void AnalysisMessenger::SetNewValue(G4UIcommand *command, G4String newValue)
     fConfig->stageD_output_dir = Trim(newValue);
     G4cout << "[AnalysisMessenger] stageD_output_dir set to "
            << fConfig->stageD_output_dir
+           << G4endl;
+    return;
+  }
+  if (command == fStageDPortalNuCmd)
+  {
+    fConfig->stageD_portal_nu = fStageDPortalNuCmd->GetNewIntValue(newValue);
+    G4cout << "[AnalysisMessenger] stageD_portal_nu set to "
+           << fConfig->stageD_portal_nu
+           << G4endl;
+    return;
+  }
+  if (command == fStageDPortalNvCmd)
+  {
+    fConfig->stageD_portal_nv = fStageDPortalNvCmd->GetNewIntValue(newValue);
+    G4cout << "[AnalysisMessenger] stageD_portal_nv set to "
+           << fConfig->stageD_portal_nv
+           << G4endl;
+    return;
+  }
+  if (command == fStageDPortalMarginUmCmd)
+  {
+    fConfig->stageD_portal_margin_um =
+        fStageDPortalMarginUmCmd->GetNewDoubleValue(newValue);
+    G4cout << "[AnalysisMessenger] stageD_portal_margin_um set to "
+           << fConfig->stageD_portal_margin_um
+           << G4endl;
+    return;
+  }
+  if (command == fStageDClearanceBinEdgesCmd)
+  {
+    std::istringstream iss(Trim(newValue));
+    G4double edge0 = 0.0;
+    G4double edge1 = 0.0;
+    G4double edge2 = 0.0;
+    if (!(iss >> edge0 >> edge1 >> edge2) ||
+        !(edge0 > 0.0 && edge0 < edge1 && edge1 < edge2))
+    {
+      G4Exception("AnalysisMessenger::SetNewValue",
+                  "BNZS_CFG_012A", FatalException,
+                  "Stage D clearance bin edges must satisfy 0 < edge0 < edge1 < edge2.");
+      return;
+    }
+    fConfig->stageD_clearance_bin0_um = edge0;
+    fConfig->stageD_clearance_bin1_um = edge1;
+    fConfig->stageD_clearance_bin2_um = edge2;
+    G4cout << "[AnalysisMessenger] stageD clearance bin edges set to "
+           << edge0 << ", " << edge1 << ", " << edge2
+           << " um" << G4endl;
+    return;
+  }
+  if (command == fStageDMaxParticleReentryTrialsCmd)
+  {
+    fConfig->stageD_max_particle_reentry_trials =
+        fStageDMaxParticleReentryTrialsCmd->GetNewIntValue(newValue);
+    G4cout << "[AnalysisMessenger] stageD_max_particle_reentry_trials set to "
+           << fConfig->stageD_max_particle_reentry_trials
+           << G4endl;
+    return;
+  }
+  if (command == fStageDMaxPortalFallbackLevelCmd)
+  {
+    fConfig->stageD_max_portal_fallback_level =
+        fStageDMaxPortalFallbackLevelCmd->GetNewIntValue(newValue);
+    G4cout << "[AnalysisMessenger] stageD_max_portal_fallback_level set to "
+           << fConfig->stageD_max_portal_fallback_level
            << G4endl;
     return;
   }

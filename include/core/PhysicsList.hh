@@ -70,4 +70,3 @@ class PhysicsList: public G4VModularPhysicsList
 //....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
 
 #endif
-

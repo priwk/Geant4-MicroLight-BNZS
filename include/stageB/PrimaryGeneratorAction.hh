@@ -52,6 +52,7 @@ public:
   std::string MakeCurrentSourceEventUid() const;
   G4int GetTotalLoadedEvents() const { return static_cast<G4int>(fTotalStreamedRecords); }
   const std::string &GetLoadedInputFile() const { return fCurrentInputFile; }
+  const std::string &GetCurrentRecordInputFile() const { return fCurrentRecordInputFile; }
 
 private:
   using HeaderIndex = std::unordered_map<std::string, std::size_t>;
@@ -119,6 +120,7 @@ private:
   std::size_t fCurrentFileIndex = 0;
   std::ifstream fCurrentInputStream;
   std::string fCurrentInputFile;
+  std::string fCurrentRecordInputFile;
   HeaderIndex fCurrentHeaderIndex;
   G4int fCurrentInputRecordCounter = 0;
 

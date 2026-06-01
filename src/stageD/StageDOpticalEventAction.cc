@@ -63,6 +63,7 @@ void StageDOpticalEventAction::BeginOfEventAction(const G4Event *event)
   fCurrentEvent.source_mode = fConfig->stageD_source_mode;
   fCurrentEvent.boundary_mode = fConfig->stageD_boundary_mode;
   fCurrentEvent.reentry_mode = fConfig->stageD_reentry_mode;
+  fCurrentEvent.particle_reentry_mode = fConfig->stageD_particle_reentry_mode;
   fCurrentEvent.matrix_reentry_mode = fConfig->stageD_matrix_reentry_mode;
   fCurrentEvent.wavelength_nm = launch.wavelength_nm;
   fCurrentEvent.source_phase = launch.source_phase;

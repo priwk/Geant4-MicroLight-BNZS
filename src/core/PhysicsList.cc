@@ -16,7 +16,9 @@ PhysicsList::PhysicsList() : G4VModularPhysicsList()
   // 1. 电磁过程：高精度低能带电粒子（alpha / Li ion）输运与能量沉积
   RegisterPhysics(new G4EmStandardPhysics_option4());
 
-  // 2. 光学过程：闪烁发光（Scintillation）、切伦科夫辐射及光学传输（反射/折射/吸收）
+  // Optical physics stays globally available because Stage C/D select their
+  // modes via macro commands before /run/initialize, after the physics list
+  // object is already constructed.
   RegisterPhysics(new G4OpticalPhysics());
 
   // 3. 强子过程：高精度热中子物理（包含中子弹性散射、非弹性散射、捕获和裂变）

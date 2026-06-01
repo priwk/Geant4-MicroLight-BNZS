@@ -62,6 +62,7 @@ public:
   std::string stageD_source_mode;
   std::string stageD_boundary_mode;
   std::string stageD_reentry_mode;
+  std::string stageD_particle_reentry_mode;
   std::string stageD_matrix_reentry_mode;
   std::string stageD_scatter_metric;
   int stageD_target_primary_scatter;
@@ -70,6 +71,14 @@ public:
   int stageD_max_steps;
   double stageD_max_path_length_um;
   std::string stageD_output_dir;
+  int stageD_portal_nu;
+  int stageD_portal_nv;
+  double stageD_portal_margin_um;
+  double stageD_clearance_bin0_um;
+  double stageD_clearance_bin1_um;
+  double stageD_clearance_bin2_um;
+  int stageD_max_particle_reentry_trials;
+  int stageD_max_portal_fallback_level;
 
   // ---- Stage B 深度映射兼容开关 ----
   // true: 允许 thickness_um == local patch thickness

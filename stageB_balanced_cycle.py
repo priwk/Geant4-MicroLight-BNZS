@@ -135,6 +135,55 @@ def write_chunk(path, header, rows):
         writer.writerows(rows)
 
 
+def remove_empty_parent_dirs(path, stop_at):
+    path = Path(path)
+    stop_at = Path(stop_at).resolve()
+    current = path
+    while True:
+        try:
+            current_resolved = current.resolve()
+        except FileNotFoundError:
+            current_resolved = current
+
+        if current_resolved == stop_at or current == current.parent:
+            break
+
+        try:
+            current.rmdir()
+        except OSError:
+            break
+
+        current = current.parent
+
+
+def remove_path_and_empty_parents(path, stop_at):
+    path = Path(path)
+    if path.is_file():
+        path.unlink(missing_ok=True)
+        remove_empty_parent_dirs(path.parent, stop_at)
+
+
+def remove_tree_if_exists(path):
+    path = Path(path)
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+
+
+def cleanup_chunk_file(chunk_path, chunk_root, keep_chunks):
+    if keep_chunks:
+        return
+    remove_path_and_empty_parents(chunk_path, chunk_root)
+
+
+def cleanup_chunk_directory(chunk_dir, chunk_root, keep_chunks):
+    if keep_chunks:
+        return
+    remove_tree_if_exists(chunk_dir)
+    remove_empty_parent_dirs(Path(chunk_dir).parent, chunk_root)
+
+
 def build_stageb_env(base_env, build_dir, project_root, bn_wt, zns_wt, ratio, placement_file):
     env = base_env.copy()
     env["BNZS_RUN_MODE"] = "StageB_ReplayAlphaLi"
@@ -238,6 +287,11 @@ def merge_ratio_outputs(project_root, ratio, source_tags, keep_part_outputs):
                 source_tag,
                 remove_parts=not keep_part_outputs,
             ),
+            merge_unexpected_boundary_exit_outputs(
+                output_ratio_dir,
+                source_tag,
+                remove_parts=not keep_part_outputs,
+            ),
             merge_boundary_summary_outputs(
                 output_ratio_dir,
                 source_tag,
@@ -284,6 +338,13 @@ def ratio_capture_dir(input_root, ratio, stagea_layout):
     if stagea_layout:
         return input_root / ratio / "neutron_capture_positions"
     return input_root / ratio
+
+
+def placement_tag_for_ratio(path, ratio_placement_dir):
+    rel = Path(path).resolve().relative_to(Path(ratio_placement_dir).resolve())
+    parts = list(rel.parts)
+    parts[-1] = rel.stem
+    return "__".join(parts)
 
 
 def run_one(build_dir, executable, macro, env, log_file, dry_run):
@@ -449,6 +510,47 @@ def merge_zns_track_outputs(output_ratio_dir, source_tag, remove_parts):
     return total_rows, merged_path
 
 
+def merge_unexpected_boundary_exit_outputs(output_ratio_dir, source_tag, remove_parts):
+    part_files = sorted(
+        output_ratio_dir.glob(f"{source_tag}_m*_p*_unexpected_boundary_exits.csv")
+    )
+    if not part_files:
+        return 0, None
+
+    merged_path = output_ratio_dir / f"{source_tag}_unexpected_boundary_exits.csv"
+    tmp_path = output_ratio_dir / f".{source_tag}_unexpected_boundary_exits.tmp"
+
+    total_rows = 0
+    header_written = False
+    with open(tmp_path, "w", newline="") as out:
+        writer = None
+        for part_file in part_files:
+            with open(part_file, newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if header is None:
+                    continue
+                if not header_written:
+                    writer = csv.writer(out)
+                    writer.writerow(header)
+                    header_written = True
+                for row in reader:
+                    if not row:
+                        continue
+                    writer.writerow(row)
+                    total_rows += 1
+
+    if not header_written:
+        tmp_path.unlink(missing_ok=True)
+        return 0, None
+
+    tmp_path.replace(merged_path)
+    if remove_parts:
+        for part_file in part_files:
+            part_file.unlink(missing_ok=True)
+    return total_rows, merged_path
+
+
 def merge_boundary_summary_outputs(output_ratio_dir, source_tag, remove_parts):
     part_files = sorted(output_ratio_dir.glob(f"{source_tag}_m*_p*_boundary_stop_summary.csv"))
     if not part_files:
@@ -565,6 +667,7 @@ def merge_existing_outputs(project_root, ratios, remove_parts, dry_run=False):
                 merge_step_outputs(ratio_dir, source_tag, remove_parts),
                 merge_capture_anchor_outputs(ratio_dir, source_tag, remove_parts),
                 merge_zns_track_outputs(ratio_dir, source_tag, remove_parts),
+                merge_unexpected_boundary_exit_outputs(ratio_dir, source_tag, remove_parts),
                 merge_boundary_summary_outputs(ratio_dir, source_tag, remove_parts),
             ]
             for rows_merged, merged_path in merged_results:
@@ -613,7 +716,7 @@ def run_grouped_by_chunk(
                 if not chunk_rows:
                     continue
 
-                placement_tag = placement_file.stem
+                placement_tag = placement_tag_for_ratio(placement_file, project_root / "Input" / "placements" / ratio)
                 chunk_name = (
                     f"{source_tag}_m{replay_idx + 1:02d}_"
                     f"p{placement_idx + 1:04d}_{placement_tag}_"
@@ -662,6 +765,7 @@ def run_grouped_by_chunk(
                     failed_runs += 1
                     print(f"!!! Failed code={code}: {log_file}")
                     raise SystemExit(code)
+                cleanup_chunk_file(chunk_path, chunk_root, args.keep_chunks)
 
     merge_ratio_outputs(project_root, ratio, source_tags, args.keep_part_outputs)
     return total_runs, failed_runs
@@ -684,73 +788,52 @@ def run_grouped_by_placement(
     total_runs = 0
     failed_runs = 0
     source_tags = [assignment["source_tag"] for assignment in assignments]
-
-    placement_jobs = {}
     placement_index_lookup = {path.resolve(): idx for idx, path in enumerate(placement_files)}
+    ratio_placement_dir = project_root / "Input" / "placements" / ratio
 
     for assignment in assignments:
         if not assignment["rows"]:
             print(f">>> Skip {ratio}/{assignment['capture_file'].name}: no compatible records")
-            continue
 
-        source_tag = assignment["source_tag"]
-        for replay in assignment["replays"]:
-            replay_idx = replay["replay_idx"]
-            for placement_file, chunk_rows in zip(replay["placements"], replay["chunks"]):
-                if not chunk_rows:
+    for placement_file in placement_files:
+        placement_key = placement_file.resolve()
+        placement_tag = placement_tag_for_ratio(placement_file, ratio_placement_dir)
+        placement_pos = placement_index_lookup[placement_key] + 1
+        placement_chunk_dir = chunk_root / ratio / f"placement_{placement_pos:04d}_{placement_tag}"
+        remove_tree_if_exists(placement_chunk_dir)
+
+        event_count = 0
+        chunk_count = 0
+
+        for assignment in assignments:
+            if not assignment["rows"]:
+                continue
+
+            source_tag = assignment["source_tag"]
+            for replay in assignment["replays"]:
+                replay_idx = replay["replay_idx"]
+                placement_chunk_rows = None
+
+                for replay_placement_file, chunk_rows in zip(replay["placements"], replay["chunks"]):
+                    if replay_placement_file.resolve() == placement_key:
+                        placement_chunk_rows = chunk_rows
+                        break
+
+                if not placement_chunk_rows:
                     continue
-
-                placement_key = placement_file.resolve()
-                placement_tag = placement_file.stem
-                placement_pos = placement_index_lookup[placement_key] + 1
-                placement_job = placement_jobs.setdefault(
-                    placement_key,
-                    {
-                        "placement_file": placement_file,
-                        "placement_tag": placement_tag,
-                        "placement_pos": placement_pos,
-                        "parts": [],
-                        "event_count": 0,
-                    },
-                )
 
                 chunk_name = (
                     f"{source_tag}_m{replay_idx + 1:02d}_"
                     f"p{placement_pos:04d}_{placement_tag}_"
                     "neutron_capture_positions.csv"
                 )
-                chunk_path = (
-                    chunk_root
-                    / ratio
-                    / f"placement_{placement_pos:04d}_{placement_tag}"
-                    / chunk_name
-                )
-                write_chunk(chunk_path, assignment["header"], chunk_rows)
+                chunk_path = placement_chunk_dir / chunk_name
+                write_chunk(chunk_path, assignment["header"], placement_chunk_rows)
+                event_count += len(placement_chunk_rows)
+                chunk_count += 1
 
-                placement_job["parts"].append(
-                    {
-                        "source_tag": source_tag,
-                        "chunk_path": chunk_path,
-                        "chunk_name": chunk_name,
-                        "events": len(chunk_rows),
-                        "replay_idx": replay_idx,
-                    }
-                )
-                placement_job["event_count"] += len(chunk_rows)
-
-    for placement_key in sorted(
-        placement_jobs,
-        key=lambda key: (
-            placement_jobs[key]["placement_pos"],
-            placement_jobs[key]["placement_tag"],
-        ),
-    ):
-        placement_job = placement_jobs[placement_key]
-        placement_file = placement_job["placement_file"]
-        placement_tag = placement_job["placement_tag"]
-        placement_pos = placement_job["placement_pos"]
-        event_count = placement_job["event_count"]
         if event_count <= 0:
+            cleanup_chunk_directory(placement_chunk_dir, chunk_root, keep_chunks=False)
             continue
 
         env = build_stageb_env(
@@ -763,7 +846,7 @@ def run_grouped_by_placement(
             placement_file,
         )
         env["BNZS_INPUT_DIR"] = relative_to_dir(
-            chunk_root / ratio / f"placement_{placement_pos:04d}_{placement_tag}",
+            placement_chunk_dir,
             build_dir,
         )
 
@@ -774,9 +857,9 @@ def run_grouped_by_placement(
 
         total_runs += 1
         print(
-            f">>> {ratio} grouped placement {placement_pos}/{len(placement_jobs)} "
+            f">>> {ratio} grouped placement {placement_pos}/{len(placement_files)} "
             f"events={event_count} beamOn={beam_on_count} placement={placement_tag} "
-            f"chunks={len(placement_job['parts'])}"
+            f"chunks={chunk_count}"
         )
 
         try:
@@ -787,6 +870,7 @@ def run_grouped_by_placement(
             failed_runs += 1
             print(f"!!! Failed code={code}: {log_file}")
             raise SystemExit(code)
+        cleanup_chunk_directory(placement_chunk_dir, chunk_root, args.keep_chunks)
 
     merge_ratio_outputs(project_root, ratio, source_tags, args.keep_part_outputs)
     return total_runs, failed_runs
@@ -839,7 +923,7 @@ def main():
         raise SystemExit(f"Executable not found: {executable}")
 
     if not args.keep_chunks and chunk_root.exists():
-        shutil.rmtree(chunk_root)
+        remove_tree_if_exists(chunk_root)
 
     total_runs = 0
     failed_runs = 0
@@ -858,7 +942,7 @@ def main():
             ),
             key=lambda p: (natural_float_tag(p), p.name),
         )
-        placement_files = sorted(ratio_placement_dir.glob("*.csv"))
+        placement_files = sorted(ratio_placement_dir.rglob("*.csv"))
 
         if not capture_files:
             print(f">>> Skip {ratio}: no capture CSV files in {ratio_input_dir}")

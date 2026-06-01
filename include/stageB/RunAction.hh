@@ -28,6 +28,7 @@ public:
   // For multi-input streaming:
   // switch output CSV according to the current input CSV path.
   void SwitchOutputCsvForInputPath(const std::string &inputPath);
+  void SwitchOutputCsvForThicknessTag(const std::string &thicknessTag);
 
   enum class OutputMode
   {
@@ -87,22 +88,50 @@ public:
     G4double trajectory_weight = 1.0;
   };
 
+  struct UnexpectedBoundaryExitRow
+  {
+    std::string physical_event_uid;
+    std::string source_event_uid;
+    G4int eventID = -1;
+    G4int record_index = -1;
+    G4double thickness_um = 0.0;
+    G4double bn_wt = 0.0;
+    G4double zns_wt = 0.0;
+    std::string placement_file;
+    std::string surface_mode;
+    std::string particle;
+    G4int trackID = -1;
+    G4int stepID = -1;
+    std::string phase_pre;
+    std::string phase_post;
+    std::string exit_face;
+    std::string exit_class;
+    G4double ekin_post_keV = 0.0;
+    G4double x_post_um = 0.0;
+    G4double y_post_um = 0.0;
+    G4double z_post_um = 0.0;
+    G4int alphali_replay_index = 0;
+    G4int alphali_replay_count = 1;
+    G4double trajectory_weight = 1.0;
+  };
+
   OutputMode GetOutputMode() const { return fOutputMode; }
   G4bool IsFullMode() const { return fOutputMode == OutputMode::Full; }
   G4bool IsSlimMode() const { return fOutputMode == OutputMode::Slim; }
 
   std::ofstream &GetFullStepCsv() { return fFullStepCsv; }
   std::ofstream &GetSlimTrackCsv() { return fSlimTrackCsv; }
+  std::ofstream &GetUnexpectedBoundaryExitCsv() { return fUnexpectedBoundaryExitCsv; }
   const std::string &GetFullStepCsvPath() const { return fFullStepCsvPath; }
   const std::string &GetSlimTrackCsvPath() const { return fSlimTrackCsvPath; }
+  const std::string &GetUnexpectedBoundaryExitCsvPath() const { return fUnexpectedBoundaryExitCsvPath; }
   G4bool IsFullStepCsvOpen() const { return fFullStepCsv.is_open(); }
   G4bool IsSlimTrackCsvOpen() const { return fSlimTrackCsv.is_open(); }
+  G4bool IsUnexpectedBoundaryExitCsvOpen() const { return fUnexpectedBoundaryExitCsv.is_open(); }
 
   void AppendCaptureAnchor(const CaptureAnchorRow &row);
-  void RecordBoundaryExit(const CaptureAnchorRow &row,
-                          const std::string &particle,
-                          BoundaryExitClass exitClass,
-                          G4double ekinPostKeV);
+  void RecordBoundaryExit(const UnexpectedBoundaryExitRow &row,
+                          BoundaryExitClass exitClass);
 
 private:
   struct OutputPaths
@@ -110,20 +139,25 @@ private:
     std::string full_steps;
     std::string capture_anchors;
     std::string zns_track_steps;
+    std::string unexpected_boundary_exits;
     std::string boundary_stop_summary;
   };
 
   std::string MakeOutputCsvPath() const;
   OutputPaths MakeOutputPathsFromInputPath(const std::string &inputPath) const;
+  OutputPaths MakeOutputPathsFromThicknessTag(const std::string &thicknessTag) const;
   std::string RecordInputPathForSummary(const std::string &inputPath) const;
   std::string ExtractThicknessTagFromInputPath(const std::string &inputPath) const;
+  std::string MakeThicknessTag(G4double thickness_um) const;
   void EnsureDataDirectory() const;
   OutputMode ReadOutputMode() const;
   void CloseOpenOutputs();
   void OpenOutputsForInputPath(const std::string &inputPath);
+  void OpenOutputsForPaths(const OutputPaths &paths);
   void WriteFullStepCsvHeader();
   void WriteCaptureAnchorCsvHeader();
   void WriteSlimTrackCsvHeader();
+  void WriteUnexpectedBoundaryExitCsvHeader();
   void WriteBoundarySummaryCsv();
 
 private:
@@ -138,6 +172,8 @@ private:
   std::string fCaptureAnchorCsvPath;
   std::ofstream fSlimTrackCsv;
   std::string fSlimTrackCsvPath;
+  std::ofstream fUnexpectedBoundaryExitCsv;
+  std::string fUnexpectedBoundaryExitCsvPath;
   std::string fBoundaryStopSummaryCsvPath;
   std::map<BoundarySummaryKey, BoundarySummary> fBoundarySummaries;
 };

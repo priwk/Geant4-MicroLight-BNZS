@@ -43,11 +43,20 @@
 
 namespace
 {
+  constexpr G4double kPlacementOverlapTolerance = 5.0e-5 * um;
+
   struct PlacementData
   {
     std::vector<G4ThreeVector> bnCenters;
     std::vector<G4ThreeVector> znsCenters;
     std::string seedBase;
+    G4double patchXYUm = -1.0;
+    G4double localThicknessUm = -1.0;
+    G4double bnWt = -1.0;
+    G4double znsWt = -1.0;
+    G4double bnRadiusUm = -1.0;
+    G4double znsRadiusUm = -1.0;
+    G4double overlapGapUm = -1.0;
   };
 
   // --------------------------------------------------------------------
@@ -176,6 +185,26 @@ namespace
     return "";
   }
 
+  void TrySetPlacementMetadataDouble(const std::string &line,
+                                     const std::string &key,
+                                     G4double &target)
+  {
+    const std::string value = ParseMetadataValue(line, key);
+    if (value.empty())
+      return;
+
+    try
+    {
+      target = std::stod(value);
+    }
+    catch (...)
+    {
+      G4Exception("DetectorConstruction::Construct",
+                  "BNZS205", FatalException,
+                  ("Invalid placement metadata value: " + key + "=" + value).c_str());
+    }
+  }
+
   std::filesystem::path MakePlacementRootDirectoryPath()
   {
     // 约定：程序从 build/ 目录运行
@@ -227,6 +256,56 @@ namespace
 
     const fs::path placementsRoot = MakePlacementRootDirectoryPath();
     std::vector<fs::path> candidates;
+    const auto returnExistingCandidate =
+        [](const std::vector<fs::path> &paths) -> fs::path
+    {
+      for (const auto &candidate : paths)
+      {
+        std::error_code existsEc;
+        if (fs::exists(candidate, existsEc) && !existsEc)
+          return fs::weakly_canonical(candidate, existsEc);
+      }
+      return {};
+    };
+
+    const auto findUniqueRecursiveMatch =
+        [&](const fs::path &searchRoot,
+            const fs::path &fileName) -> fs::path
+    {
+      std::error_code searchEc;
+      if (fileName.empty() ||
+          !fs::exists(searchRoot, searchEc) ||
+          !fs::is_directory(searchRoot, searchEc))
+      {
+        return {};
+      }
+
+      std::vector<fs::path> matches;
+      for (const auto &entry : fs::recursive_directory_iterator(searchRoot, searchEc))
+      {
+        if (searchEc)
+          break;
+        if (!entry.is_regular_file())
+          continue;
+        if (entry.path().filename() == fileName)
+          matches.push_back(entry.path());
+      }
+
+      if (matches.empty())
+        return {};
+
+      std::sort(matches.begin(), matches.end());
+      if (matches.size() > 1)
+      {
+        G4Exception("DetectorConstruction::Construct",
+                    "BNZS202", FatalException,
+                    ("Ambiguous placement filename under " + searchRoot.string() + ": "
+                     + fileName.string())
+                        .c_str());
+      }
+
+      return fs::weakly_canonical(matches.front(), searchEc);
+    };
 
     const auto parts = input.lexically_normal();
     if (!parts.empty())
@@ -252,8 +331,29 @@ namespace
       }
     }
 
+    // Prefer explicit project-relative placement paths such as
+    // Input/placements/1-2/... over filename-only fallback matching.
+    if (const fs::path directMatch = returnExistingCandidate(candidates);
+        !directMatch.empty())
+    {
+      return directMatch;
+    }
+
     if (!input.parent_path().filename().empty())
+    {
       candidates.push_back(placementsRoot / input.parent_path().filename() / input.filename());
+
+      if (const fs::path parentScopedMatch = returnExistingCandidate(candidates);
+          !parentScopedMatch.empty())
+      {
+        return parentScopedMatch;
+      }
+
+      const fs::path nestedMatch =
+          findUniqueRecursiveMatch(placementsRoot / input.parent_path().filename(), input.filename());
+      if (!nestedMatch.empty())
+        return nestedMatch;
+    }
 
     if (!input.filename().empty())
     {
@@ -261,15 +361,10 @@ namespace
       {
         if (ec || !entry.is_directory())
           continue;
-        candidates.push_back(entry.path() / input.filename());
+        const fs::path nestedMatch = findUniqueRecursiveMatch(entry.path(), input.filename());
+        if (!nestedMatch.empty())
+          return nestedMatch;
       }
-    }
-
-    for (const auto &candidate : candidates)
-    {
-      std::error_code existsEc;
-      if (fs::exists(candidate, existsEc) && !existsEc)
-        return fs::weakly_canonical(candidate, existsEc);
     }
 
     return input;
@@ -305,7 +400,7 @@ namespace
     }
 
     std::vector<fs::path> files;
-    for (const auto &entry : fs::directory_iterator(ratioDir))
+    for (const auto &entry : fs::recursive_directory_iterator(ratioDir))
     {
       if (!entry.is_regular_file())
         continue;
@@ -359,6 +454,13 @@ namespace
         const std::string seedBase = ParseMetadataValue(line, "seedBase");
         if (!seedBase.empty())
           data.seedBase = seedBase;
+        TrySetPlacementMetadataDouble(line, "patchXY_um", data.patchXYUm);
+        TrySetPlacementMetadataDouble(line, "localThickness_um", data.localThicknessUm);
+        TrySetPlacementMetadataDouble(line, "bnWt", data.bnWt);
+        TrySetPlacementMetadataDouble(line, "znsWt", data.znsWt);
+        TrySetPlacementMetadataDouble(line, "bnRadius_um", data.bnRadiusUm);
+        TrySetPlacementMetadataDouble(line, "znsRadius_um", data.znsRadiusUm);
+        TrySetPlacementMetadataDouble(line, "overlapGap_um", data.overlapGapUm);
         continue;
       }
 
@@ -536,8 +638,10 @@ namespace
                     if (i >= j)
                       continue; // 避免重复比较和自己比自己
 
-                    G4double reqDist = allParts[i].radius + allParts[j].radius + overlapGap;
-                    if ((allParts[i].pos - allParts[j].pos).mag2() < reqDist * reqDist)
+                    const G4double reqDist = allParts[i].radius + allParts[j].radius + overlapGap;
+                    const G4double tolReqDist =
+                        std::max(0.0, reqDist - kPlacementOverlapTolerance);
+                    if ((allParts[i].pos - allParts[j].pos).mag2() < tolReqDist * tolReqDist)
                     {
                       G4Exception("DetectorConstruction::Construct",
                                   "BNZS207", FatalException,
@@ -996,8 +1100,16 @@ void DetectorConstruction::DefineMaterials()
   // 注意：如果你的 G4 版本低于 10.7，请将 SCINTILLATIONCOMPONENT1 替换为 FASTCOMPONENT
   mptZnS->AddProperty("SCINTILLATIONCOMPONENT1", photonEnergy, emissionZnS, nEntries);
 
-  // ZnS:Ag 理论发光产额极高（约 75000 光子/MeV，但实际在粉末屏中测出效率会降低，此处给理论值）
-  mptZnS->AddConstProperty("SCINTILLATIONYIELD", 75000. / MeV);
+  const G4bool enableZnSScintillation =
+      (fConfig != nullptr) &&
+      (fConfig->runMode == RunMode::StageC_OpticalRVE ||
+       fConfig->runMode == RunMode::StageD_OpticalHomogenization);
+
+  // Stage A/B 不需要生成 optical photons；将 scintillation yield 设为 0
+  // 以避免误注册光学物理时引入灾难性的 photon tracking 开销。
+  mptZnS->AddConstProperty(
+      "SCINTILLATIONYIELD",
+      enableZnSScintillation ? (75000. / MeV) : 0.0);
 
   // 展宽系数，设为 1.0 表现出符合泊松分布的光子涨落
   mptZnS->AddConstProperty("RESOLUTIONSCALE", 1.0);
@@ -1129,13 +1241,6 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
 
   fScoringVolume = fMatrixLogical;
 
-  // ---------- particle solids ----------
-  auto *solidBN = new G4Orb("BNSolid", fBNRadius);
-  auto *solidZnS = new G4Orb("ZnSSolid", fZnSRadius);
-
-  fBNLogical = new G4LogicalVolume(solidBN, fBNMaterial, "BN_LV");
-  fZnSLogical = new G4LogicalVolume(solidZnS, fZnSMaterial, "ZnS_LV");
-
   // =========================================================
   // Load external placement file instead of generating packing internally
   // =========================================================
@@ -1160,6 +1265,61 @@ G4VPhysicalVolume *DetectorConstruction::Construct()
 
   PlacementData loaded = ReadPlacementCSV(fLoadedPlacementFile);
   fLoadedPlacementSeedBase = loaded.seedBase.empty() ? "unknown" : loaded.seedBase;
+
+  const G4double metadataTol = 1.0e-9;
+
+  if (loaded.patchXYUm > 0.0 && std::abs(loaded.patchXYUm - fPatchXY / um) > metadataTol)
+  {
+    G4Exception("DetectorConstruction::Construct",
+                "BNZS208", FatalException,
+                ("Placement patchXY_um does not match current geometry: "
+                 + std::to_string(loaded.patchXYUm) + " vs " + std::to_string(fPatchXY / um))
+                    .c_str());
+  }
+
+  if (loaded.localThicknessUm > 0.0 &&
+      std::abs(loaded.localThicknessUm - localThickness / um) > metadataTol)
+  {
+    G4Exception("DetectorConstruction::Construct",
+                "BNZS209", FatalException,
+                ("Placement localThickness_um does not match current geometry: "
+                 + std::to_string(loaded.localThicknessUm) + " vs " + std::to_string(localThickness / um))
+                    .c_str());
+  }
+
+  if (loaded.bnWt > 0.0 && std::abs(loaded.bnWt - fBnWt) > metadataTol)
+  {
+    G4Exception("DetectorConstruction::Construct",
+                "BNZS210", FatalException,
+                ("Placement bnWt does not match current geometry ratio: "
+                 + std::to_string(loaded.bnWt) + " vs " + std::to_string(fBnWt))
+                    .c_str());
+  }
+
+  if (loaded.znsWt > 0.0 && std::abs(loaded.znsWt - fZnsWt) > metadataTol)
+  {
+    G4Exception("DetectorConstruction::Construct",
+                "BNZS211", FatalException,
+                ("Placement znsWt does not match current geometry ratio: "
+                 + std::to_string(loaded.znsWt) + " vs " + std::to_string(fZnsWt))
+                    .c_str());
+  }
+
+  if (loaded.bnRadiusUm > 0.0)
+    fBNRadius = loaded.bnRadiusUm * um;
+
+  if (loaded.znsRadiusUm > 0.0)
+    fZnSRadius = loaded.znsRadiusUm * um;
+
+  if (loaded.overlapGapUm >= 0.0)
+    fOverlapGap = loaded.overlapGapUm * um;
+
+  // ---------- particle solids ----------
+  auto *solidBN = new G4Orb("BNSolid", fBNRadius);
+  auto *solidZnS = new G4Orb("ZnSSolid", fZnSRadius);
+
+  fBNLogical = new G4LogicalVolume(solidBN, fBNMaterial, "BN_LV");
+  fZnSLogical = new G4LogicalVolume(solidZnS, fZnSMaterial, "ZnS_LV");
 
   ValidatePlacementData(loaded,
                         fPatchXY,

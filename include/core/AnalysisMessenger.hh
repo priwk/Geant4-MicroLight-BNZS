@@ -37,6 +37,7 @@ private:
   G4UIcmdWithAString *fStageDSourceModeCmd;
   G4UIcmdWithAString *fStageDBoundaryModeCmd;
   G4UIcmdWithAString *fStageDReentryModeCmd;
+  G4UIcmdWithAString *fStageDParticleReentryModeCmd;
   G4UIcmdWithAString *fStageDMatrixReentryModeCmd;
   G4UIcmdWithAString *fStageDScatterMetricCmd;
   G4UIcmdWithAnInteger *fStageDTargetPrimaryScatterCmd;
@@ -45,6 +46,12 @@ private:
   G4UIcmdWithAnInteger *fStageDMaxStepsCmd;
   G4UIcmdWithADouble *fStageDMaxPathLengthUmCmd;
   G4UIcmdWithAString *fStageDOutputDirCmd;
+  G4UIcmdWithAnInteger *fStageDPortalNuCmd;
+  G4UIcmdWithAnInteger *fStageDPortalNvCmd;
+  G4UIcmdWithADouble *fStageDPortalMarginUmCmd;
+  G4UIcommand *fStageDClearanceBinEdgesCmd;
+  G4UIcmdWithAnInteger *fStageDMaxParticleReentryTrialsCmd;
+  G4UIcmdWithAnInteger *fStageDMaxPortalFallbackLevelCmd;
   G4UIcommand *fOpticalSamplesPerStepCmd;
   G4UIcommand *fOpticalParamsCmd;
   G4UIcommand *fWeightRatioCmd;

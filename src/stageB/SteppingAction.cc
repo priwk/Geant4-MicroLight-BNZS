@@ -121,17 +121,17 @@ namespace
         const G4double halfZUm = PatchHalfZUm(det);
 
         if (zUm >= halfZUm - tolUm)
-            return "+z";
+            return "+Z";
         if (zUm <= -halfZUm + tolUm)
-            return "-z";
+            return "-Z";
         if (xUm >= halfXYUm - tolUm)
-            return "+x";
+            return "+X";
         if (xUm <= -halfXYUm + tolUm)
-            return "-x";
+            return "-X";
         if (yUm >= halfXYUm - tolUm)
-            return "+y";
+            return "+Y";
         if (yUm <= -halfXYUm + tolUm)
-            return "-y";
+            return "-Y";
         return "unknown";
     }
 
@@ -139,11 +139,11 @@ namespace
         const std::string &surfaceMode,
         const std::string &exitFace)
     {
-        if (surfaceMode == "front_surface" && exitFace == "+z")
+        if (surfaceMode == "front_surface" && exitFace == "+Z")
         {
             return RunAction::BoundaryExitClass::PhysicalSurfaceExit;
         }
-        if (surfaceMode == "back_surface" && exitFace == "-z")
+        if (surfaceMode == "back_surface" && exitFace == "-Z")
         {
             return RunAction::BoundaryExitClass::PhysicalSurfaceExit;
         }
@@ -208,7 +208,7 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
     auto *runAction = fEventAction ? fEventAction->GetRunAction() : nullptr;
     if (runAction && fPrimaryAction)
     {
-        runAction->SwitchOutputCsvForInputPath(fPrimaryAction->GetLoadedInputFile());
+        runAction->SwitchOutputCsvForInputPath(fPrimaryAction->GetCurrentRecordInputFile());
     }
 
     if (runAction && fPrimaryAction && runAction->IsFullMode() && runAction->IsFullStepCsvOpen())
@@ -285,6 +285,7 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
             << track->GetTrackID() << ","
             << track->GetCurrentStepNumber() << ","
             << ParticleLabel(track) << ","
+            << phasePre << ","
             << phasePost << ","
             << xPre.x() / um << ","
             << xPre.y() / um << ","
@@ -313,11 +314,35 @@ void SteppingAction::UserSteppingAction(const G4Step *step)
             {
                 const auto anchor = fEventAction->MakeCurrentCaptureAnchorRow();
                 const std::string exitFace = ExitFaceLabel(xPost, det);
-                runAction->RecordBoundaryExit(
-                    anchor,
-                    ParticleLabel(track),
-                    ClassifyBoundaryExit(anchor.surface_mode, exitFace),
-                    ekinPost / keV);
+                const auto exitClass = ClassifyBoundaryExit(anchor.surface_mode, exitFace);
+                RunAction::UnexpectedBoundaryExitRow exitRow;
+                exitRow.physical_event_uid = anchor.physical_event_uid;
+                exitRow.source_event_uid = anchor.source_event_uid;
+                exitRow.eventID = anchor.eventID;
+                exitRow.record_index = anchor.record_index;
+                exitRow.thickness_um = anchor.thickness_um;
+                exitRow.bn_wt = anchor.bn_wt;
+                exitRow.zns_wt = anchor.zns_wt;
+                exitRow.placement_file = anchor.placement_file;
+                exitRow.surface_mode = anchor.surface_mode;
+                exitRow.particle = ParticleLabel(track);
+                exitRow.trackID = track->GetTrackID();
+                exitRow.stepID = track->GetCurrentStepNumber();
+                exitRow.phase_pre = phasePre;
+                exitRow.phase_post = phasePost;
+                exitRow.exit_face = exitFace;
+                exitRow.exit_class =
+                    (exitClass == RunAction::BoundaryExitClass::PhysicalSurfaceExit)
+                        ? "physical_surface_exit"
+                        : "unexpected_artificial_exit";
+                exitRow.ekin_post_keV = ekinPost / keV;
+                exitRow.x_post_um = xPost.x() / um;
+                exitRow.y_post_um = xPost.y() / um;
+                exitRow.z_post_um = xPost.z() / um;
+                exitRow.alphali_replay_index = anchor.alphali_replay_index;
+                exitRow.alphali_replay_count = anchor.alphali_replay_count;
+                exitRow.trajectory_weight = anchor.trajectory_weight;
+                runAction->RecordBoundaryExit(exitRow, exitClass);
             }
         }
         track->SetTrackStatus(fStopAndKill);

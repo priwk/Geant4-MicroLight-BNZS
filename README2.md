@@ -33,8 +33,9 @@ StageD 的目标不是宏观厚度出光模拟，而是对单个随机 RVE 做�
 - `runMode = StageD_OpticalHomogenization`
 - `source_mode = uniform_ZnS`
 - `boundary_mode = same_phase_reentry`
-- `reentry_mode = same_phase_rho_over_R`
-- `matrix_reentry_mode = random_matrix`
+- `reentry_mode = state_matched`
+- `particle_reentry_mode = sphere_q_mu`
+- `matrix_reentry_mode = clearance_binned_portal`
 - 输出逐 photon 事件表
 - 输出单 run summary 表
 
@@ -144,8 +145,9 @@ cat >/tmp/stageD_run.mac <<'EOF'
 /cfg/stageD/setWavelengthNm 450
 /cfg/stageD/setSourceMode uniform_ZnS
 /cfg/stageD/setBoundaryMode same_phase_reentry
-/cfg/stageD/setReentryMode same_phase_rho_over_R
-/cfg/stageD/setMatrixReentryMode random_matrix
+/cfg/stageD/setReentryMode state_matched
+/cfg/stageD/setParticleReentryMode sphere_q_mu
+/cfg/stageD/setMatrixReentryMode clearance_binned_portal
 /cfg/stageD/setThetaThresholdDeg 1.0
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000

@@ -1,55 +1,871 @@
 #include "StageDReentrySampler.hh"
 
+#include "AnalysisConfig.hh"
+
 #include "Randomize.hh"
+#include "G4Exception.hh"
 #include "G4SystemOfUnits.hh"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 namespace
 {
   constexpr G4double kBoundaryEpsilon = 1.0e-4 * um;
-  constexpr G4int kMaxMatrixTrials = 10000;
+  constexpr G4double kNearZero = 1.0e-18;
+  constexpr G4double kLargeClearance = 1.0e9 * um;
+
+  G4double Uniform01FromHash(std::uint64_t key)
+  {
+    key ^= key >> 33;
+    key *= 0xff51afd7ed558ccdULL;
+    key ^= key >> 33;
+    key *= 0xc4ceb9fe1a85ec53ULL;
+    key ^= key >> 33;
+    constexpr long double kScale =
+        1.0L / static_cast<long double>(std::numeric_limits<std::uint64_t>::max());
+    return static_cast<G4double>(static_cast<long double>(key) * kScale);
+  }
 }
 
-StageDReentrySampler::StageDReentrySampler(const DetectorConstruction *detector)
-    : fDetector(detector)
+StageDReentrySampler::StageDReentrySampler(const DetectorConstruction *detector,
+                                           const AnalysisConfig *config)
+    : fDetector(detector),
+      fConfig(config),
+      fSpheres(),
+      fSphereIdsByPhase(),
+      fSphereWeightCdfByPhase(),
+      fHalfX(detector ? detector->GetPatchHalfXUm() * um : 0.0),
+      fHalfY(detector ? detector->GetPatchHalfYUm() * um : 0.0),
+      fHalfZ(detector ? detector->GetPatchHalfZUm() * um : 0.0),
+      fMaxSphereRadius(0.0),
+      fGridCellSize(0.0),
+      fGridMinCorner(-fHalfX, -fHalfY, -fHalfZ),
+      fGridNx(1),
+      fGridNy(1),
+      fGridNz(1),
+      fGridCells(),
+      fCandidateVisitStamps(),
+      fCandidateVisitToken(1),
+      fPortalHalfX(0.0),
+      fPortalHalfY(0.0),
+      fPortalHalfZ(0.0),
+      fPortalMargin((config != nullptr && config->stageD_portal_margin_um > 0.0)
+                        ? config->stageD_portal_margin_um * um
+                        : 0.0),
+      fPortalNu((config != nullptr) ? config->stageD_portal_nu : 128),
+      fPortalNv((config != nullptr) ? config->stageD_portal_nv : 128),
+      fClearanceBinEdges{
+          (config != nullptr ? config->stageD_clearance_bin0_um : 0.02) * um,
+          (config != nullptr ? config->stageD_clearance_bin1_um : 0.10) * um,
+          (config != nullptr ? config->stageD_clearance_bin2_um : 0.50) * um},
+      fMaxParticleReentryTrials((config != nullptr) ? config->stageD_max_particle_reentry_trials : 64),
+      fMaxPortalFallbackLevel((config != nullptr) ? config->stageD_max_portal_fallback_level : 4),
+      fMatrixPortals(),
+      fPortalSummary()
 {
+  BuildSphereCache();
+  BuildSpatialGrid();
+  BuildMatrixPortalPool();
 }
 
-const DetectorConstruction::SphereInfo *
-StageDReentrySampler::FindContainingOrNearestSphere(
-    DetectorConstruction::Phase phase,
-    const G4ThreeVector &position) const
+G4bool StageDReentrySampler::SampleReentry(const ReentryContext &ctx,
+                                           G4ThreeVector &newPosition,
+                                           ReentryDiagnostics &diag) const
+{
+  diag = ReentryDiagnostics{};
+  diag.exitPhase = ctx.phase;
+  diag.exitInsidePoint = ctx.exitInsidePoint;
+
+  if (ctx.phase == DetectorConstruction::Phase::BN ||
+      ctx.phase == DetectorConstruction::Phase::ZnS)
+  {
+    const std::string mode =
+        (fConfig != nullptr) ? fConfig->stageD_particle_reentry_mode : std::string("sphere_q_mu");
+    if (mode == "sphere_q_mu" ||
+        ((fConfig != nullptr) && fConfig->stageD_reentry_mode == "state_matched") ||
+        mode.empty())
+    {
+      return SampleParticleSphereQMuReentry(ctx, newPosition, diag);
+    }
+
+    if (mode == "same_phase_rho_over_R" || mode == "same_phase_random")
+    {
+      const MicroSphere *oldSphere = FindContainingSphereOnly(ctx.phase, ctx.exitInsidePoint);
+      G4ThreeVector oldPosition = ctx.exitInsidePoint;
+      if (oldSphere == nullptr)
+      {
+        oldSphere = FindContainingSphereOnly(ctx.phase, ctx.prePos);
+        oldPosition = ctx.prePos;
+      }
+      if (oldSphere == nullptr || oldSphere->radius <= 0.0)
+        return false;
+
+      const G4double rho = (oldPosition - oldSphere->center).mag();
+      const G4double qUpper =
+          std::max(0.0, 1.0 - (kBoundaryEpsilon / std::max(oldSphere->radius, kBoundaryEpsilon)));
+      const G4double q =
+          std::clamp(rho / std::max(oldSphere->radius, kBoundaryEpsilon), 0.0, qUpper);
+
+      diag.particleQExit = q;
+      diag.particleMuExit = 0.0;
+      const G4bool ok = SampleParticleSphereQOnlyReentry(ctx, oldSphere, q, newPosition, diag);
+      if (ok)
+      {
+        if (mode == "same_phase_rho_over_R")
+        {
+          diag.strategy = "particle_sphere_q_only";
+          diag.fallbackLevel = "legacy_q_mode";
+        }
+        else
+        {
+          diag.strategy = "particle_same_phase_random_debug";
+          diag.fallbackLevel = "legacy_random_mode";
+        }
+      }
+      return ok;
+    }
+
+    G4Exception("StageDReentrySampler::SampleReentry",
+                "BNZS_D_REENTRY_000", FatalException,
+                ("Unsupported Stage D particle re-entry mode: " + mode).c_str());
+    return false;
+  }
+
+  if (ctx.phase == DetectorConstruction::Phase::Matrix)
+  {
+    const std::string &matrixMode =
+        (fConfig != nullptr) ? fConfig->stageD_matrix_reentry_mode : std::string();
+    if (matrixMode == "clearance_binned_portal" || matrixMode.empty())
+      return SampleMatrixClearanceBinnedPortalReentry(ctx, newPosition, diag);
+
+    if (matrixMode == "random_matrix_debug")
+      return SampleRandomMatrixDebugReentry(ctx, newPosition, diag);
+
+    if (matrixMode == "distance_matched_matrix")
+    {
+      G4Exception("StageDReentrySampler::SampleReentry",
+                  "BNZS_D_REENTRY_001", FatalException,
+                  "Stage D matrix re-entry mode distance_matched_matrix is not implemented. "
+                  "Use clearance_binned_portal or random_matrix_debug.");
+      return false;
+    }
+
+    if (matrixMode == "random_matrix")
+    {
+      G4Exception("StageDReentrySampler::SampleReentry",
+                  "BNZS_D_REENTRY_002", FatalException,
+                  "Stage D matrix re-entry mode random_matrix was renamed to random_matrix_debug. "
+                  "It is debug-only and cannot be the production default.");
+      return false;
+    }
+
+    G4Exception("StageDReentrySampler::SampleReentry",
+                "BNZS_D_REENTRY_003", FatalException,
+                ("Unsupported Stage D matrix re-entry mode: " + matrixMode).c_str());
+    return false;
+  }
+
+  return false;
+}
+
+G4bool StageDReentrySampler::InsideRveBox(const G4ThreeVector &point) const
+{
+  return std::abs(point.x()) <= fHalfX &&
+         std::abs(point.y()) <= fHalfY &&
+         std::abs(point.z()) <= fHalfZ;
+}
+
+DetectorConstruction::Phase StageDReentrySampler::FastPhaseAtPointForReentry(
+    const G4ThreeVector &point) const
+{
+  if (!InsideRveBox(point))
+    return DetectorConstruction::Phase::World;
+
+  std::vector<G4int> candidateIds;
+  CollectCandidateSphereIds(point, candidateIds);
+
+  for (G4int sphereId : candidateIds)
+  {
+    const MicroSphere &sphere = fSpheres[static_cast<std::size_t>(sphereId)];
+    if (sphere.phase != DetectorConstruction::Phase::BN)
+      continue;
+    if ((point - sphere.center).mag2() <= sphere.radius2)
+      return DetectorConstruction::Phase::BN;
+  }
+
+  for (G4int sphereId : candidateIds)
+  {
+    const MicroSphere &sphere = fSpheres[static_cast<std::size_t>(sphereId)];
+    if (sphere.phase != DetectorConstruction::Phase::ZnS)
+      continue;
+    if ((point - sphere.center).mag2() <= sphere.radius2)
+      return DetectorConstruction::Phase::ZnS;
+  }
+
+  return DetectorConstruction::Phase::Matrix;
+}
+
+void StageDReentrySampler::BuildSphereCache()
 {
   if (fDetector == nullptr)
-    return nullptr;
+    return;
 
-  const std::vector<DetectorConstruction::SphereInfo> *spheres = nullptr;
-  if (phase == DetectorConstruction::Phase::BN)
-    spheres = &fDetector->GetBNSpheres();
-  else if (phase == DetectorConstruction::Phase::ZnS)
-    spheres = &fDetector->GetZnSSpheres();
-  else
-    return nullptr;
-
-  const DetectorConstruction::SphereInfo *best = nullptr;
-  G4double bestDistance2 = DBL_MAX;
-
-  for (const auto &sphere : *spheres)
+  auto appendPhase = [&](const std::vector<DetectorConstruction::SphereInfo> &src,
+                         DetectorConstruction::Phase phase)
   {
-    const G4double distance2 = (position - sphere.center).mag2();
-    if (distance2 <= sphere.radius * sphere.radius)
-      return &sphere;
-
-    if (distance2 < bestDistance2)
+    const std::size_t phaseIndex = PhaseVectorIndex(phase);
+    for (const auto &sphere : src)
     {
-      bestDistance2 = distance2;
-      best = &sphere;
+      MicroSphere micro;
+      micro.phase = phase;
+      micro.center = sphere.center;
+      micro.radius = sphere.radius;
+      micro.radius2 = sphere.radius * sphere.radius;
+      micro.visibleVolume = (4.0 / 3.0) * CLHEP::pi * sphere.radius * sphere.radius * sphere.radius;
+      micro.isClipped =
+          (std::abs(micro.center.x()) + micro.radius > fHalfX ||
+           std::abs(micro.center.y()) + micro.radius > fHalfY ||
+           std::abs(micro.center.z()) + micro.radius > fHalfZ);
+
+      const G4int sphereId = static_cast<G4int>(fSpheres.size());
+      fSpheres.push_back(micro);
+      fSphereIdsByPhase[phaseIndex].push_back(sphereId);
+      fMaxSphereRadius = std::max(fMaxSphereRadius, sphere.radius);
+    }
+  };
+
+  appendPhase(fDetector->GetBNSpheres(), DetectorConstruction::Phase::BN);
+  appendPhase(fDetector->GetZnSSpheres(), DetectorConstruction::Phase::ZnS);
+
+  for (std::size_t phaseIndex = 0; phaseIndex < fSphereIdsByPhase.size(); ++phaseIndex)
+  {
+    G4double running = 0.0;
+    auto &cdf = fSphereWeightCdfByPhase[phaseIndex];
+    cdf.reserve(fSphereIdsByPhase[phaseIndex].size());
+    for (G4int sphereId : fSphereIdsByPhase[phaseIndex])
+    {
+      running += SphereSelectionWeight(fSpheres[static_cast<std::size_t>(sphereId)]);
+      cdf.push_back(running);
     }
   }
 
+  fCandidateVisitStamps.assign(fSpheres.size(), 0);
+}
+
+void StageDReentrySampler::BuildSpatialGrid()
+{
+  fGridCellSize = std::max(fMaxSphereRadius, 2.0 * kBoundaryEpsilon);
+  if (fGridCellSize <= 0.0)
+  {
+    fGridCellSize = std::max({fHalfX, fHalfY, fHalfZ, 1.0 * um});
+  }
+
+  const auto computeDim = [&](G4double halfExtent)
+  {
+    return std::max(1, static_cast<G4int>(std::ceil((2.0 * halfExtent) / fGridCellSize)));
+  };
+
+  fGridNx = computeDim(fHalfX);
+  fGridNy = computeDim(fHalfY);
+  fGridNz = computeDim(fHalfZ);
+
+  fGridCells.clear();
+  fGridCells.resize(static_cast<std::size_t>(fGridNx) *
+                    static_cast<std::size_t>(fGridNy) *
+                    static_cast<std::size_t>(fGridNz));
+
+  for (std::size_t sphereId = 0; sphereId < fSpheres.size(); ++sphereId)
+  {
+    const MicroSphere &sphere = fSpheres[sphereId];
+    const G4double xmin = std::max(-fHalfX, sphere.center.x() - sphere.radius);
+    const G4double xmax = std::min(+fHalfX, sphere.center.x() + sphere.radius);
+    const G4double ymin = std::max(-fHalfY, sphere.center.y() - sphere.radius);
+    const G4double ymax = std::min(+fHalfY, sphere.center.y() + sphere.radius);
+    const G4double zmin = std::max(-fHalfZ, sphere.center.z() - sphere.radius);
+    const G4double zmax = std::min(+fHalfZ, sphere.center.z() + sphere.radius);
+
+    auto coordToCell = [&](G4double coord, G4double halfExtent, G4int dim)
+    {
+      const G4double shifted = (coord + halfExtent) / fGridCellSize;
+      return std::clamp(static_cast<G4int>(std::floor(shifted)), 0, dim - 1);
+    };
+
+    const G4int ix0 = coordToCell(xmin, fHalfX, fGridNx);
+    const G4int ix1 = coordToCell(xmax, fHalfX, fGridNx);
+    const G4int iy0 = coordToCell(ymin, fHalfY, fGridNy);
+    const G4int iy1 = coordToCell(ymax, fHalfY, fGridNy);
+    const G4int iz0 = coordToCell(zmin, fHalfZ, fGridNz);
+    const G4int iz1 = coordToCell(zmax, fHalfZ, fGridNz);
+
+    for (G4int ix = ix0; ix <= ix1; ++ix)
+    {
+      for (G4int iy = iy0; iy <= iy1; ++iy)
+      {
+        for (G4int iz = iz0; iz <= iz1; ++iz)
+        {
+          fGridCells[FlatCellIndex(ix, iy, iz)].push_back(static_cast<G4int>(sphereId));
+        }
+      }
+    }
+  }
+}
+
+void StageDReentrySampler::BuildMatrixPortalPool()
+{
+  fPortalSummary = StageDReentryPortalSummary{};
+
+  const G4double defaultMargin = (fPortalMargin > 0.0) ? fPortalMargin : fMaxSphereRadius;
+  if (fHalfX > defaultMargin && fHalfY > defaultMargin && fHalfZ > defaultMargin)
+  {
+    fPortalHalfX = fHalfX - defaultMargin;
+    fPortalHalfY = fHalfY - defaultMargin;
+    fPortalHalfZ = fHalfZ - defaultMargin;
+    fPortalMargin = defaultMargin;
+  }
+  else
+  {
+    fPortalHalfX = std::max(kBoundaryEpsilon, fHalfX - kBoundaryEpsilon);
+    fPortalHalfY = std::max(kBoundaryEpsilon, fHalfY - kBoundaryEpsilon);
+    fPortalHalfZ = std::max(kBoundaryEpsilon, fHalfZ - kBoundaryEpsilon);
+    fPortalMargin = kBoundaryEpsilon;
+  }
+
+  fPortalNu = std::max(1, fPortalNu);
+  fPortalNv = std::max(1, fPortalNv);
+
+  for (std::size_t faceIndex = 0; faceIndex < kPortalFaceCount; ++faceIndex)
+  {
+    const PortalFace face = static_cast<PortalFace>(faceIndex);
+    const G4ThreeVector inward = InwardNormal(face);
+    for (G4int iu = 0; iu < fPortalNu; ++iu)
+    {
+      for (G4int iv = 0; iv < fPortalNv; ++iv)
+      {
+        const std::uint64_t base =
+            (static_cast<std::uint64_t>(faceIndex) << 48) ^
+            (static_cast<std::uint64_t>(iu) << 24) ^
+            static_cast<std::uint64_t>(iv);
+        const G4double u01 = (static_cast<G4double>(iu) + Uniform01FromHash(base ^ 0x9e3779b97f4a7c15ULL)) /
+                             static_cast<G4double>(fPortalNu);
+        const G4double v01 = (static_cast<G4double>(iv) + Uniform01FromHash(base ^ 0xc2b2ae3d27d4eb4fULL)) /
+                             static_cast<G4double>(fPortalNv);
+
+        const G4ThreeVector surfacePoint = PointOnVirtualFace(face, u01, v01);
+        const G4ThreeVector insidePoint = surfacePoint + kBoundaryEpsilon * inward;
+        if (FastPhaseAtPointForReentry(insidePoint) != DetectorConstruction::Phase::Matrix)
+          continue;
+
+        const NearestSurface nearest = FindNearestParticleSurface(insidePoint);
+        const G4int bin = ClearanceBin(nearest.clearance);
+        const std::size_t bucket = PortalPhaseBucketIndex(nearest.nearestPhase);
+
+        MatrixPortal portal;
+        portal.position = insidePoint;
+        portal.clearance = nearest.clearance;
+        portal.nearestPhase = nearest.nearestPhase;
+        portal.clearanceBin = bin;
+
+        fMatrixPortals[faceIndex][bucket][static_cast<std::size_t>(bin)].push_back(portal);
+        ++fPortalSummary.total_portal_count;
+        ++fPortalSummary.portal_count_by_face[faceIndex];
+        ++fPortalSummary.portal_count_by_bin[static_cast<std::size_t>(bin)];
+      }
+    }
+  }
+}
+
+G4bool StageDReentrySampler::SampleParticleSphereQMuReentry(
+    const ReentryContext &ctx,
+    G4ThreeVector &newPosition,
+    ReentryDiagnostics &diag) const
+{
+  diag.strategy = "particle_sphere_q_mu";
+  diag.fallbackLevel = "none";
+
+  const MicroSphere *oldSphere = FindContainingSphereOnly(ctx.phase, ctx.exitInsidePoint);
+  G4ThreeVector oldPosition = ctx.exitInsidePoint;
+  if (oldSphere == nullptr)
+  {
+    oldSphere = FindContainingSphereOnly(ctx.phase, ctx.prePos);
+    oldPosition = ctx.prePos;
+  }
+  if (oldSphere == nullptr || oldSphere->radius <= 0.0)
+    return false;
+
+  const G4double rho = (oldPosition - oldSphere->center).mag();
+  const G4double qUpper = std::max(0.0, 1.0 - (kBoundaryEpsilon / std::max(oldSphere->radius, kBoundaryEpsilon)));
+  const G4double q = std::clamp(rho / std::max(oldSphere->radius, kBoundaryEpsilon), 0.0, qUpper);
+
+  const G4ThreeVector oldDir = ctx.oldDir.unit();
+  G4double mu = 0.0;
+  if (rho > kNearZero)
+  {
+    const G4ThreeVector nOld = (oldPosition - oldSphere->center) / rho;
+    mu = std::clamp(oldDir.dot(nOld), -1.0, 1.0);
+  }
+
+  diag.particleQExit = q;
+  diag.particleMuExit = mu;
+
+  const G4int maxTrials = std::max(1, fMaxParticleReentryTrials);
+  for (G4int trial = 0; trial < maxTrials; ++trial)
+  {
+    ++diag.trials;
+    const G4int sphereId = SampleWeightedSamePhaseSphereId(ctx.phase);
+    if (sphereId < 0)
+      break;
+
+    const MicroSphere &newSphere = fSpheres[static_cast<std::size_t>(sphereId)];
+    const G4ThreeVector nNew = RandomUnitVectorWithFixedDot(oldDir, mu);
+    G4ThreeVector candidate = newSphere.center + q * newSphere.radius * nNew;
+
+    if (!ClampInsideSameSphereRoundoffOnly(candidate, newSphere))
+      continue;
+    if (!ValidatePhase(candidate, ctx.phase))
+      continue;
+
+    const G4double rhoEntry = (candidate - newSphere.center).mag();
+    G4ThreeVector nEntry = nNew;
+    if (rhoEntry > kNearZero)
+      nEntry = (candidate - newSphere.center) / rhoEntry;
+
+    newPosition = candidate;
+    diag.entryPoint = candidate;
+    diag.entryPhase = ctx.phase;
+    diag.particleQEntry = rhoEntry / std::max(newSphere.radius, kBoundaryEpsilon);
+    diag.particleMuEntry = std::clamp(oldDir.dot(nEntry), -1.0, 1.0);
+    return true;
+  }
+
+  return SampleParticleSphereQOnlyReentry(ctx, oldSphere, q, newPosition, diag);
+}
+
+G4bool StageDReentrySampler::SampleParticleSphereQOnlyReentry(
+    const ReentryContext &ctx,
+    const MicroSphere *oldSphere,
+    G4double q,
+    G4ThreeVector &newPosition,
+    ReentryDiagnostics &diag) const
+{
+  (void)oldSphere;
+
+  const G4int maxTrials = std::max(1, fMaxParticleReentryTrials / 2);
+  for (G4int trial = 0; trial < maxTrials; ++trial)
+  {
+    ++diag.trials;
+    const G4int sphereId = SampleWeightedSamePhaseSphereId(ctx.phase);
+    if (sphereId < 0)
+      break;
+
+    const MicroSphere &newSphere = fSpheres[static_cast<std::size_t>(sphereId)];
+    const G4ThreeVector nNew = RandomUnitVector();
+    G4ThreeVector candidate = newSphere.center + q * newSphere.radius * nNew;
+
+    if (!ClampInsideSameSphereRoundoffOnly(candidate, newSphere))
+      continue;
+    if (!ValidatePhase(candidate, ctx.phase))
+      continue;
+
+    const G4double rhoEntry = (candidate - newSphere.center).mag();
+    const G4ThreeVector radial =
+        (rhoEntry > kNearZero) ? ((candidate - newSphere.center) / rhoEntry) : nNew;
+
+    newPosition = candidate;
+    diag.strategy = "particle_sphere_q_only";
+    diag.fallbackLevel = "q_only";
+    diag.entryPoint = candidate;
+    diag.entryPhase = ctx.phase;
+    diag.particleQEntry = rhoEntry / std::max(newSphere.radius, kBoundaryEpsilon);
+    diag.particleMuEntry = std::clamp(ctx.oldDir.unit().dot(radial), -1.0, 1.0);
+    return true;
+  }
+
+  return false;
+}
+
+G4bool StageDReentrySampler::SampleMatrixClearanceBinnedPortalReentry(
+    const ReentryContext &ctx,
+    G4ThreeVector &newPosition,
+    ReentryDiagnostics &diag) const
+{
+  diag.strategy = "matrix_clearance_binned_portal";
+  diag.fallbackLevel = "none";
+
+  const NearestSurface exitNearest = FindNearestParticleSurface(ctx.exitInsidePoint);
+  const G4int exitBin = ClearanceBin(exitNearest.clearance);
+  const DetectorConstruction::Phase exitNearestPhase = exitNearest.nearestPhase;
+  diag.matrixClearanceExitUm = exitNearest.clearance / um;
+  diag.matrixNearestPhaseExit = PhaseNameOrUnknown(exitNearestPhase);
+  diag.matrixClearanceBinExit = exitBin;
+
+  struct PoolRef
+  {
+    PortalFace face;
+    const std::vector<MatrixPortal> *pool;
+  };
+
+  const G4ThreeVector oldDir = ctx.oldDir.unit();
+
+  auto isInflowFace = [&](PortalFace face)
+  {
+    return oldDir.dot(InwardNormal(face)) > 0.0;
+  };
+
+  auto addPoolRef = [&](std::vector<PoolRef> &refs,
+                        PortalFace face,
+                        std::size_t bucketIndex,
+                        std::size_t binIndex)
+  {
+    const auto &pool =
+        fMatrixPortals[static_cast<std::size_t>(face)][bucketIndex][binIndex];
+    if (!pool.empty())
+      refs.push_back(PoolRef{face, &pool});
+  };
+
+  auto attemptPools = [&](const std::vector<std::size_t> &bucketIndices,
+                          const std::vector<std::size_t> &binIndices,
+                          const std::string &fallbackLabel) -> G4bool
+  {
+    struct FaceChoice
+    {
+      PortalFace face;
+      G4double weight = 0.0;
+      std::vector<PoolRef> pools;
+    };
+
+    std::vector<FaceChoice> faceChoices;
+    for (std::size_t faceIndex = 0; faceIndex < kPortalFaceCount; ++faceIndex)
+    {
+      const PortalFace face = static_cast<PortalFace>(faceIndex);
+      if (!isInflowFace(face))
+        continue;
+
+      FaceChoice choice;
+      choice.face = face;
+      for (std::size_t bucketIndex : bucketIndices)
+      {
+        for (std::size_t binIndex : binIndices)
+        {
+          addPoolRef(choice.pools, face, bucketIndex, binIndex);
+        }
+      }
+
+      if (choice.pools.empty())
+        continue;
+
+      std::size_t totalPoolSize = 0;
+      for (const PoolRef &pool : choice.pools)
+        totalPoolSize += pool.pool->size();
+
+      if (totalPoolSize == 0)
+        continue;
+
+      choice.weight = oldDir.dot(InwardNormal(face)) *
+                      FaceArea(face) *
+                      static_cast<G4double>(totalPoolSize);
+      if (choice.weight > 0.0)
+        faceChoices.push_back(choice);
+    }
+
+    if (faceChoices.empty())
+      return false;
+
+    G4double totalWeight = 0.0;
+    for (const auto &choice : faceChoices)
+      totalWeight += choice.weight;
+    if (totalWeight <= 0.0)
+      return false;
+
+    G4double pick = G4UniformRand() * totalWeight;
+    const FaceChoice *selectedFace = &faceChoices.front();
+    for (const auto &choice : faceChoices)
+    {
+      pick -= choice.weight;
+      if (pick <= 0.0)
+      {
+        selectedFace = &choice;
+        break;
+      }
+    }
+
+    std::size_t totalPortalCount = 0;
+    for (const PoolRef &poolRef : selectedFace->pools)
+      totalPortalCount += poolRef.pool->size();
+    if (totalPortalCount == 0)
+      return false;
+
+    std::size_t portalPick =
+        static_cast<std::size_t>(G4UniformRand() * static_cast<G4double>(totalPortalCount));
+    if (portalPick >= totalPortalCount)
+      portalPick = totalPortalCount - 1;
+
+    const MatrixPortal *selectedPortal = nullptr;
+    for (const PoolRef &poolRef : selectedFace->pools)
+    {
+      if (portalPick < poolRef.pool->size())
+      {
+        selectedPortal = &(*poolRef.pool)[portalPick];
+        break;
+      }
+      portalPick -= poolRef.pool->size();
+    }
+    if (selectedPortal == nullptr)
+      return false;
+
+    if (!ValidatePhase(selectedPortal->position, DetectorConstruction::Phase::Matrix))
+      return false;
+
+    const NearestSurface entryNearest = FindNearestParticleSurface(selectedPortal->position);
+    const G4int entryBin = ClearanceBin(entryNearest.clearance);
+
+    newPosition = selectedPortal->position;
+    diag.fallbackLevel = fallbackLabel;
+    diag.entryPoint = selectedPortal->position;
+    diag.entryPhase = DetectorConstruction::Phase::Matrix;
+    diag.matrixClearanceEntryUm = entryNearest.clearance / um;
+    diag.matrixNearestPhaseEntry = PhaseNameOrUnknown(entryNearest.nearestPhase);
+    diag.matrixClearanceBinEntry = entryBin;
+    return true;
+  };
+
+  const std::size_t sameBucket = PortalPhaseBucketIndex(exitNearestPhase);
+  const std::array<std::size_t, 3> anyBuckets{0, 1, 2};
+  const std::array<std::size_t, 1> sameBucketOnly{sameBucket};
+  const std::array<std::size_t, 1> sameBinOnly{static_cast<std::size_t>(exitBin)};
+
+  if (attemptPools(std::vector<std::size_t>(sameBucketOnly.begin(), sameBucketOnly.end()),
+                   std::vector<std::size_t>(sameBinOnly.begin(), sameBinOnly.end()),
+                   "same_bin"))
+  {
+    return true;
+  }
+
+  if (fMaxPortalFallbackLevel >= 1)
+  {
+    std::vector<std::size_t> adjacentBins;
+    if (exitBin > 0)
+      adjacentBins.push_back(static_cast<std::size_t>(exitBin - 1));
+    if (exitBin + 1 < static_cast<G4int>(kClearanceBinCount))
+      adjacentBins.push_back(static_cast<std::size_t>(exitBin + 1));
+
+    if (!adjacentBins.empty() &&
+        attemptPools(std::vector<std::size_t>(sameBucketOnly.begin(), sameBucketOnly.end()),
+                     adjacentBins,
+                     "adjacent_bin"))
+    {
+      return true;
+    }
+  }
+
+  if (fMaxPortalFallbackLevel >= 2)
+  {
+    std::vector<std::size_t> allBins{0, 1, 2, 3};
+    if (attemptPools(std::vector<std::size_t>(sameBucketOnly.begin(), sameBucketOnly.end()),
+                     allBins,
+                     "same_phase_any_bin"))
+    {
+      return true;
+    }
+  }
+
+  if (fMaxPortalFallbackLevel >= 3)
+  {
+    if (attemptPools(std::vector<std::size_t>(anyBuckets.begin(), anyBuckets.end()),
+                     std::vector<std::size_t>(sameBinOnly.begin(), sameBinOnly.end()),
+                     "any_phase_same_bin"))
+    {
+      return true;
+    }
+  }
+
+  if (fMaxPortalFallbackLevel >= 4)
+  {
+    std::vector<std::size_t> allBins{0, 1, 2, 3};
+    if (attemptPools(std::vector<std::size_t>(anyBuckets.begin(), anyBuckets.end()),
+                     allBins,
+                     "any_portal"))
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+G4bool StageDReentrySampler::SampleRandomMatrixDebugReentry(
+    const ReentryContext &ctx,
+    G4ThreeVector &newPosition,
+    ReentryDiagnostics &diag) const
+{
+  (void)ctx;
+
+  constexpr G4int kMaxRandomMatrixTrials = 10000;
+  for (G4int trial = 0; trial < kMaxRandomMatrixTrials; ++trial)
+  {
+    ++diag.trials;
+    const G4ThreeVector candidate = RandomPointInMatrixBox();
+    if (!ValidatePhase(candidate, DetectorConstruction::Phase::Matrix))
+      continue;
+
+    const NearestSurface nearest = FindNearestParticleSurface(candidate);
+    newPosition = candidate;
+    diag.strategy = "matrix_random_debug";
+    diag.fallbackLevel = "random_matrix_debug";
+    diag.entryPoint = candidate;
+    diag.entryPhase = DetectorConstruction::Phase::Matrix;
+    diag.matrixClearanceEntryUm = nearest.clearance / um;
+    diag.matrixNearestPhaseEntry = PhaseNameOrUnknown(nearest.nearestPhase);
+    diag.matrixClearanceBinEntry = ClearanceBin(nearest.clearance);
+    return true;
+  }
+
+  return false;
+}
+
+const StageDReentrySampler::MicroSphere *StageDReentrySampler::FindContainingSphereOnly(
+    DetectorConstruction::Phase phase,
+    const G4ThreeVector &position) const
+{
+  if (!InsideRveBox(position))
+    return nullptr;
+
+  std::vector<G4int> candidateIds;
+  CollectCandidateSphereIds(position, candidateIds);
+
+  for (G4int sphereId : candidateIds)
+  {
+    const MicroSphere &sphere = fSpheres[static_cast<std::size_t>(sphereId)];
+    if (sphere.phase != phase)
+      continue;
+    if ((position - sphere.center).mag2() <= sphere.radius2)
+      return &sphere;
+  }
+
+  return nullptr;
+}
+
+StageDReentrySampler::NearestSurface StageDReentrySampler::FindNearestParticleSurface(
+    const G4ThreeVector &position) const
+{
+  NearestSurface best;
+  best.clearance = kLargeClearance;
+
+  G4int ix = 0;
+  G4int iy = 0;
+  G4int iz = 0;
+  if (!PointToCell(position, ix, iy, iz))
+    return best;
+
+  if (fSpheres.empty())
+    return best;
+
+  if (fCandidateVisitToken == std::numeric_limits<G4int>::max())
+  {
+    std::fill(fCandidateVisitStamps.begin(), fCandidateVisitStamps.end(), 0);
+    fCandidateVisitToken = 1;
+  }
+  ++fCandidateVisitToken;
+
+  const G4double maxSearchDistance =
+      fClearanceBinEdges[2] + fMaxSphereRadius + fGridCellSize;
+  const G4int maxLayer =
+      std::max(1, static_cast<G4int>(std::ceil(maxSearchDistance / fGridCellSize)));
+
+  for (G4int layer = 0; layer <= maxLayer; ++layer)
+  {
+    const G4int ix0 = std::max(0, ix - layer);
+    const G4int ix1 = std::min(fGridNx - 1, ix + layer);
+    const G4int iy0 = std::max(0, iy - layer);
+    const G4int iy1 = std::min(fGridNy - 1, iy + layer);
+    const G4int iz0 = std::max(0, iz - layer);
+    const G4int iz1 = std::min(fGridNz - 1, iz + layer);
+
+    for (G4int cx = ix0; cx <= ix1; ++cx)
+    {
+      for (G4int cy = iy0; cy <= iy1; ++cy)
+      {
+        for (G4int cz = iz0; cz <= iz1; ++cz)
+        {
+          const auto &cell = fGridCells[FlatCellIndex(cx, cy, cz)];
+          for (G4int sphereId : cell)
+          {
+            const std::size_t sphereIndex = static_cast<std::size_t>(sphereId);
+            if (fCandidateVisitStamps[sphereIndex] == fCandidateVisitToken)
+              continue;
+            fCandidateVisitStamps[sphereIndex] = fCandidateVisitToken;
+
+            const MicroSphere &sphere = fSpheres[sphereIndex];
+            const G4ThreeVector offset = position - sphere.center;
+            const G4double distance = offset.mag();
+            const G4double clearance = distance - sphere.radius;
+            if (clearance < best.clearance)
+            {
+              best.clearance = clearance;
+              best.nearestPhase = sphere.phase;
+              best.sphereId = sphereId;
+              best.surfaceNormal = (distance > kNearZero) ? (offset / distance) : RandomUnitVector();
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (best.clearance > fClearanceBinEdges[2])
+  {
+    best.nearestPhase = DetectorConstruction::Phase::Unknown;
+    best.sphereId = -1;
+  }
+
   return best;
+}
+
+G4bool StageDReentrySampler::ClampInsideSameSphereRoundoffOnly(
+    G4ThreeVector &point,
+    const MicroSphere &sphere) const
+{
+  G4ThreeVector offset = point - sphere.center;
+  const G4double rho = offset.mag();
+  const G4double maxInsideRadius = std::max(0.0, sphere.radius - kBoundaryEpsilon);
+
+  if (rho <= maxInsideRadius)
+    return true;
+
+  if (rho > sphere.radius + 8.0 * kBoundaryEpsilon)
+    return false;
+
+  if (rho <= kNearZero)
+  {
+    point = sphere.center;
+    return true;
+  }
+
+  offset /= rho;
+  point = sphere.center + maxInsideRadius * offset;
+  return true;
+}
+
+G4bool StageDReentrySampler::ValidatePhase(const G4ThreeVector &point,
+                                           DetectorConstruction::Phase phase) const
+{
+  if (phase == DetectorConstruction::Phase::Matrix)
+  {
+    return InsideRveBox(point) &&
+           FastPhaseAtPointForReentry(point) == DetectorConstruction::Phase::Matrix;
+  }
+
+  if (phase == DetectorConstruction::Phase::BN ||
+      phase == DetectorConstruction::Phase::ZnS)
+  {
+    return InsideRveBox(point) &&
+           FastPhaseAtPointForReentry(point) == phase;
+  }
+
+  return false;
 }
 
 G4ThreeVector StageDReentrySampler::RandomUnitVector() const
@@ -62,110 +878,247 @@ G4ThreeVector StageDReentrySampler::RandomUnitVector() const
                        cosTheta);
 }
 
-G4ThreeVector StageDReentrySampler::NudgeInsidePhase(
-    const G4ThreeVector &candidate,
-    DetectorConstruction::Phase phase) const
+G4ThreeVector StageDReentrySampler::RandomUnitVectorWithFixedDot(
+    const G4ThreeVector &axis,
+    G4double mu) const
 {
-  if (fDetector == nullptr)
-    return candidate;
+  if (axis.mag2() <= kNearZero)
+    return RandomUnitVector();
 
-  if (phase == DetectorConstruction::Phase::Matrix)
-  {
-    const G4double halfX = fDetector->GetPatchHalfXUm() * um - kBoundaryEpsilon;
-    const G4double halfY = fDetector->GetPatchHalfYUm() * um - kBoundaryEpsilon;
-    const G4double halfZ = fDetector->GetPatchHalfZUm() * um - kBoundaryEpsilon;
-    return G4ThreeVector(std::clamp(candidate.x(), -halfX, halfX),
-                         std::clamp(candidate.y(), -halfY, halfY),
-                         std::clamp(candidate.z(), -halfZ, halfZ));
-  }
+  const G4ThreeVector e3 = axis.unit();
+  G4ThreeVector ref(0.0, 0.0, 1.0);
+  if (std::abs(e3.dot(ref)) > 0.9)
+    ref = G4ThreeVector(0.0, 1.0, 0.0);
 
-  const DetectorConstruction::SphereInfo *sphere =
-      FindContainingOrNearestSphere(phase, candidate);
-  if (sphere == nullptr)
-    return candidate;
+  G4ThreeVector e1 = e3.cross(ref);
+  if (e1.mag2() <= kNearZero)
+    return RandomUnitVector();
+  e1 = e1.unit();
+  G4ThreeVector e2 = e3.cross(e1).unit();
 
-  G4ThreeVector offset = candidate - sphere->center;
-  const G4double norm = offset.mag();
-  if (norm <= 0.0)
-    offset = RandomUnitVector();
-  else
-    offset /= norm;
-
-  const G4double radius = std::max(0.0, sphere->radius - kBoundaryEpsilon);
-  return sphere->center + radius * offset;
+  const G4double phi = CLHEP::twopi * G4UniformRand();
+  const G4double muClamped = std::clamp(mu, -1.0, 1.0);
+  const G4double s = std::sqrt(std::max(0.0, 1.0 - muClamped * muClamped));
+  return muClamped * e3 + s * (std::cos(phi) * e1 + std::sin(phi) * e2);
 }
 
 G4ThreeVector StageDReentrySampler::RandomPointInMatrixBox() const
 {
-  const G4double halfX = fDetector->GetPatchHalfXUm() * um;
-  const G4double halfY = fDetector->GetPatchHalfYUm() * um;
-  const G4double halfZ = fDetector->GetPatchHalfZUm() * um;
-  return G4ThreeVector((2.0 * G4UniformRand() - 1.0) * halfX,
-                       (2.0 * G4UniformRand() - 1.0) * halfY,
-                       (2.0 * G4UniformRand() - 1.0) * halfZ);
+  return G4ThreeVector((2.0 * G4UniformRand() - 1.0) * fHalfX,
+                       (2.0 * G4UniformRand() - 1.0) * fHalfY,
+                       (2.0 * G4UniformRand() - 1.0) * fHalfZ);
 }
 
-G4bool StageDReentrySampler::SampleSamePhaseSphereReentry(
-    DetectorConstruction::Phase phase,
-    const G4ThreeVector &positionBeforeExit,
-    const std::string &reentryMode,
-    G4ThreeVector &newPosition) const
+G4double StageDReentrySampler::SphereSelectionWeight(const MicroSphere &sphere) const
 {
-  if (fDetector == nullptr)
+  if (sphere.visibleVolume > 0.0)
+    return sphere.visibleVolume;
+  return std::max(kNearZero, sphere.radius * sphere.radius * sphere.radius);
+}
+
+G4int StageDReentrySampler::SampleWeightedSamePhaseSphereId(
+    DetectorConstruction::Phase phase) const
+{
+  const std::size_t phaseIndex = PhaseVectorIndex(phase);
+  const auto &sphereIds = fSphereIdsByPhase[phaseIndex];
+  const auto &cdf = fSphereWeightCdfByPhase[phaseIndex];
+  if (sphereIds.empty() || cdf.empty() || cdf.back() <= 0.0)
+    return -1;
+
+  const G4double target = G4UniformRand() * cdf.back();
+  const auto it = std::lower_bound(cdf.begin(), cdf.end(), target);
+  const std::size_t index = static_cast<std::size_t>(std::distance(cdf.begin(), it));
+  return sphereIds[std::min(index, sphereIds.size() - 1)];
+}
+
+G4int StageDReentrySampler::ClearanceBin(G4double clearance) const
+{
+  if (clearance < fClearanceBinEdges[0])
+    return 0;
+  if (clearance < fClearanceBinEdges[1])
+    return 1;
+  if (clearance < fClearanceBinEdges[2])
+    return 2;
+  return 3;
+}
+
+std::size_t StageDReentrySampler::FlatCellIndex(G4int ix, G4int iy, G4int iz) const
+{
+  return (static_cast<std::size_t>(ix) * static_cast<std::size_t>(fGridNy) +
+          static_cast<std::size_t>(iy)) *
+             static_cast<std::size_t>(fGridNz) +
+         static_cast<std::size_t>(iz);
+}
+
+G4bool StageDReentrySampler::PointToCell(const G4ThreeVector &point,
+                                         G4int &ix,
+                                         G4int &iy,
+                                         G4int &iz) const
+{
+  if (!InsideRveBox(point))
     return false;
 
-  const auto *oldSphere = FindContainingOrNearestSphere(phase, positionBeforeExit);
-  if (oldSphere == nullptr || oldSphere->radius <= 0.0)
-    return false;
-
-  const std::vector<DetectorConstruction::SphereInfo> *candidates = nullptr;
-  if (phase == DetectorConstruction::Phase::BN)
-    candidates = &fDetector->GetBNSpheres();
-  else if (phase == DetectorConstruction::Phase::ZnS)
-    candidates = &fDetector->GetZnSSpheres();
-  else
-    return false;
-
-  if (candidates->empty())
-    return false;
-
-  const std::size_t index =
-      static_cast<std::size_t>(G4UniformRand() * candidates->size()) % candidates->size();
-  const auto &newSphere = (*candidates)[index];
-
-  const G4double rho = (positionBeforeExit - oldSphere->center).mag();
-  const G4double q = std::clamp(rho / oldSphere->radius, 0.0, 1.0);
-
-  G4ThreeVector direction = RandomUnitVector();
-  if (reentryMode == "same_phase_random")
+  auto coordToCell = [&](G4double coord, G4double halfExtent, G4int dim)
   {
-    const G4double scale = std::cbrt(G4UniformRand());
-    direction *= scale;
-  }
-  newPosition = newSphere.center + q * newSphere.radius * direction;
-  newPosition = NudgeInsidePhase(newPosition, phase);
+    const G4double shifted = (coord + halfExtent) / fGridCellSize;
+    return std::clamp(static_cast<G4int>(std::floor(shifted)), 0, dim - 1);
+  };
+
+  ix = coordToCell(point.x(), fHalfX, fGridNx);
+  iy = coordToCell(point.y(), fHalfY, fGridNy);
+  iz = coordToCell(point.z(), fHalfZ, fGridNz);
   return true;
 }
 
-G4bool StageDReentrySampler::SampleMatrixReentry(
-    const std::string &matrixMode,
-    G4ThreeVector &newPosition) const
+void StageDReentrySampler::CollectCandidateSphereIds(
+    const G4ThreeVector &point,
+    std::vector<G4int> &candidateIds) const
 {
-  if (fDetector == nullptr)
-    return false;
+  candidateIds.clear();
 
-  if (matrixMode != "random_matrix" && matrixMode != "distance_matched_matrix")
-    return false;
+  G4int ix = 0;
+  G4int iy = 0;
+  G4int iz = 0;
+  if (!PointToCell(point, ix, iy, iz))
+    return;
 
-  for (G4int trial = 0; trial < kMaxMatrixTrials; ++trial)
+  if (fSpheres.empty())
+    return;
+
+  if (fCandidateVisitToken == std::numeric_limits<G4int>::max())
   {
-    const G4ThreeVector candidate = RandomPointInMatrixBox();
-    if (fDetector->FindPhaseAtPoint(candidate) == DetectorConstruction::Phase::Matrix)
+    std::fill(fCandidateVisitStamps.begin(), fCandidateVisitStamps.end(), 0);
+    fCandidateVisitToken = 1;
+  }
+  ++fCandidateVisitToken;
+
+  for (G4int dx = -1; dx <= 1; ++dx)
+  {
+    const G4int cx = ix + dx;
+    if (cx < 0 || cx >= fGridNx)
+      continue;
+    for (G4int dy = -1; dy <= 1; ++dy)
     {
-      newPosition = NudgeInsidePhase(candidate, DetectorConstruction::Phase::Matrix);
-      return true;
+      const G4int cy = iy + dy;
+      if (cy < 0 || cy >= fGridNy)
+        continue;
+      for (G4int dz = -1; dz <= 1; ++dz)
+      {
+        const G4int cz = iz + dz;
+        if (cz < 0 || cz >= fGridNz)
+          continue;
+
+        const auto &cell = fGridCells[FlatCellIndex(cx, cy, cz)];
+        for (G4int sphereId : cell)
+        {
+          const std::size_t sphereIndex = static_cast<std::size_t>(sphereId);
+          if (fCandidateVisitStamps[sphereIndex] == fCandidateVisitToken)
+            continue;
+          fCandidateVisitStamps[sphereIndex] = fCandidateVisitToken;
+          candidateIds.push_back(sphereId);
+        }
+      }
     }
   }
+}
 
-  return false;
+G4double StageDReentrySampler::HalfExtentX() const
+{
+  return fPortalHalfX;
+}
+
+G4double StageDReentrySampler::HalfExtentY() const
+{
+  return fPortalHalfY;
+}
+
+G4double StageDReentrySampler::HalfExtentZ() const
+{
+  return fPortalHalfZ;
+}
+
+G4ThreeVector StageDReentrySampler::InwardNormal(PortalFace face) const
+{
+  switch (face)
+  {
+  case PortalFace::PosX:
+    return G4ThreeVector(-1.0, 0.0, 0.0);
+  case PortalFace::NegX:
+    return G4ThreeVector(+1.0, 0.0, 0.0);
+  case PortalFace::PosY:
+    return G4ThreeVector(0.0, -1.0, 0.0);
+  case PortalFace::NegY:
+    return G4ThreeVector(0.0, +1.0, 0.0);
+  case PortalFace::PosZ:
+    return G4ThreeVector(0.0, 0.0, -1.0);
+  case PortalFace::NegZ:
+  default:
+    return G4ThreeVector(0.0, 0.0, +1.0);
+  }
+}
+
+G4double StageDReentrySampler::FaceArea(PortalFace face) const
+{
+  switch (face)
+  {
+  case PortalFace::PosX:
+  case PortalFace::NegX:
+    return 4.0 * HalfExtentY() * HalfExtentZ();
+  case PortalFace::PosY:
+  case PortalFace::NegY:
+    return 4.0 * HalfExtentX() * HalfExtentZ();
+  case PortalFace::PosZ:
+  case PortalFace::NegZ:
+  default:
+    return 4.0 * HalfExtentX() * HalfExtentY();
+  }
+}
+
+G4ThreeVector StageDReentrySampler::PointOnVirtualFace(PortalFace face,
+                                                       G4double u01,
+                                                       G4double v01) const
+{
+  const G4double x = -HalfExtentX() + 2.0 * HalfExtentX() * u01;
+  const G4double y = -HalfExtentY() + 2.0 * HalfExtentY() * u01;
+  const G4double z = -HalfExtentZ() + 2.0 * HalfExtentZ() * v01;
+
+  switch (face)
+  {
+  case PortalFace::PosX:
+    return G4ThreeVector(+HalfExtentX(), -HalfExtentY() + 2.0 * HalfExtentY() * u01, -HalfExtentZ() + 2.0 * HalfExtentZ() * v01);
+  case PortalFace::NegX:
+    return G4ThreeVector(-HalfExtentX(), -HalfExtentY() + 2.0 * HalfExtentY() * u01, -HalfExtentZ() + 2.0 * HalfExtentZ() * v01);
+  case PortalFace::PosY:
+    return G4ThreeVector(-HalfExtentX() + 2.0 * HalfExtentX() * u01, +HalfExtentY(), -HalfExtentZ() + 2.0 * HalfExtentZ() * v01);
+  case PortalFace::NegY:
+    return G4ThreeVector(-HalfExtentX() + 2.0 * HalfExtentX() * u01, -HalfExtentY(), -HalfExtentZ() + 2.0 * HalfExtentZ() * v01);
+  case PortalFace::PosZ:
+    return G4ThreeVector(-HalfExtentX() + 2.0 * HalfExtentX() * u01, -HalfExtentY() + 2.0 * HalfExtentY() * v01, +HalfExtentZ());
+  case PortalFace::NegZ:
+  default:
+    return G4ThreeVector(-HalfExtentX() + 2.0 * HalfExtentX() * u01, -HalfExtentY() + 2.0 * HalfExtentY() * v01, -HalfExtentZ());
+  }
+}
+
+std::size_t StageDReentrySampler::PhaseVectorIndex(DetectorConstruction::Phase phase)
+{
+  return (phase == DetectorConstruction::Phase::ZnS) ? 1u : 0u;
+}
+
+std::size_t StageDReentrySampler::PortalPhaseBucketIndex(
+    DetectorConstruction::Phase phase)
+{
+  if (phase == DetectorConstruction::Phase::BN)
+    return 0u;
+  if (phase == DetectorConstruction::Phase::ZnS)
+    return 1u;
+  return 2u;
+}
+
+const char *StageDReentrySampler::PhaseNameOrUnknown(
+    DetectorConstruction::Phase phase)
+{
+  if (phase == DetectorConstruction::Phase::Unknown)
+    return "Unknown";
+  return DetectorConstruction::PhaseName(phase);
 }

@@ -20,6 +20,44 @@ struct StageDPhotonLaunchRecord
   G4bool is_continuation = false;
 };
 
+struct StageDReentryDiagnosticRecord
+{
+  G4int event_id = -1;
+  G4int reentry_index = 0;
+  std::string strategy;
+  std::string fallback_level;
+  std::string exit_phase;
+  std::string entry_phase;
+
+  G4ThreeVector old_dir;
+  G4ThreeVector exit_point;
+  G4ThreeVector entry_point;
+
+  G4double particle_q_exit = -1.0;
+  G4double particle_q_entry = -1.0;
+  G4double particle_mu_exit = 0.0;
+  G4double particle_mu_entry = 0.0;
+
+  G4double matrix_clearance_exit_um = -1.0;
+  G4double matrix_clearance_entry_um = -1.0;
+  std::string matrix_nearest_phase_exit;
+  std::string matrix_nearest_phase_entry;
+  G4int matrix_clearance_bin_exit = -1;
+  G4int matrix_clearance_bin_entry = -1;
+
+  G4int trials = 0;
+};
+
+struct StageDReentryPortalSummary
+{
+  static constexpr std::size_t kFaceCount = 6;
+  static constexpr std::size_t kBinCount = 4;
+
+  G4int total_portal_count = 0;
+  std::array<G4int, kFaceCount> portal_count_by_face{};
+  std::array<G4int, kBinCount> portal_count_by_bin{};
+};
+
 struct StageDPhotonEventRecord
 {
   static constexpr std::size_t kPhaseFunctionBins = 64;
@@ -30,6 +68,7 @@ struct StageDPhotonEventRecord
   std::string source_mode;
   std::string boundary_mode;
   std::string reentry_mode;
+  std::string particle_reentry_mode;
   std::string matrix_reentry_mode;
   G4double wavelength_nm = 0.0;
 
@@ -80,6 +119,15 @@ struct StageDPhotonEventRecord
   G4int num_reentry_BN = 0;
   G4int num_reentry_ZnS = 0;
   G4int num_reentry_matrix = 0;
+  G4int num_reentry_particle_q_mu = 0;
+  G4int num_reentry_matrix_clearance_portal = 0;
+  G4int num_reentry_fallback_same_bin = 0;
+  G4int num_reentry_fallback_adjacent_bin = 0;
+  G4int num_reentry_fallback_any_bin = 0;
+  G4int num_reentry_fallback_any_phase_same_bin = 0;
+  G4int num_reentry_fallback_any_portal = 0;
+  G4int num_reentry_random_matrix_debug = 0;
+  G4int num_reentry_failed = 0;
 
   G4double sum_cos_theta = 0.0;
   G4double sum_cos_theta_particle = 0.0;

@@ -18,6 +18,19 @@ print(target.relative_to(root).as_posix())
 PY
 }
 
+placement_tag() {
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]).resolve()
+target = Path(sys.argv[2]).resolve()
+rel = target.relative_to(root)
+parts = list(rel.parts)
+parts[-1] = rel.stem
+print("__".join(parts))
+PY
+}
+
 mkdir -p "$BUILD_DIR" "$LOG_DIR"
 
 echo "=== Build ==="
@@ -50,8 +63,7 @@ for ratio in "${ratios[@]}"; do
   bn_wt="${ratio%%-*}"
   zns_wt="${ratio#*-}"
 
-  shopt -s nullglob
-  placements=("$ratio_dir"/*.csv "$ratio_dir"/*.txt)
+  mapfile -t placements < <(find "$ratio_dir" -type f \( -name '*.csv' -o -name '*.txt' \) | sort)
   if [ "${#placements[@]}" -eq 0 ]; then
     echo "No placement files found in: $ratio_dir"
     continue
@@ -66,8 +78,9 @@ for ratio in "${ratios[@]}"; do
 
   for placement in "${placements[@]}"; do
     base="$(basename "$placement")"
+    tag="$(placement_tag "$ratio_dir" "$placement")"
     macro="$BUILD_DIR/stageA_batch_current.mac"
-    log="$LOG_DIR/${ratio}_${base%.*}.log"
+    log="$LOG_DIR/${ratio}_${tag}.log"
     placement_rel="$(project_relpath "$placement")"
 
     cat > "$macro" <<EOF

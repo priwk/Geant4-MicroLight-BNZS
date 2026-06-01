@@ -211,8 +211,8 @@ namespace
     return WeightPartToTagString(bnWt) + "-" + WeightPartToTagString(znsWt);
   }
 
-  const G4double kXYMargin = 6.8 * um;
-  const G4double kZBulkMargin = 7.4 * um;
+  const G4double kXYMargin = 7.0 * um;
+  const G4double kZBulkMargin = 7.45 * um;
 
   G4bool IsInsideSafeXY(const G4ThreeVector &p, const DetectorConstruction *det)
   {
@@ -296,6 +296,7 @@ PrimaryGeneratorAction::PrimaryGeneratorAction(AnalysisConfig *config)
       fCurrentFileIndex(0),
       fCurrentInputStream(),
       fCurrentInputFile(""),
+      fCurrentRecordInputFile(""),
       fCurrentHeaderIndex(),
       fCurrentInputRecordCounter(0),
       fFirstRecordForGeometry(),
@@ -650,6 +651,7 @@ G4bool PrimaryGeneratorAction::ReadNextRecord(CaptureRecord &rec)
               fCurrentInputRecordCounter,
               rec))
       {
+        fCurrentRecordInputFile = fCurrentInputFile;
         ++fTotalStreamedRecords;
         ++fCurrentInputRecordCounter;
         return true;
@@ -670,6 +672,8 @@ void PrimaryGeneratorAction::InitializeInputStreaming()
   fNoMoreInput = false;
   fTotalStreamedRecords = 0;
   fHasFirstRecordForGeometry = false;
+  fCurrentInputFile.clear();
+  fCurrentRecordInputFile.clear();
   fCurrentHeaderIndex.clear();
   fCurrentInputRecordCounter = 0;
   fCurrentAlphaLiReplayIndex = 0;

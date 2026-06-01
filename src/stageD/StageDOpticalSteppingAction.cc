@@ -27,6 +27,8 @@
 
 namespace
 {
+  constexpr G4double kBoundaryEpsilon = 1.0e-4 * um;
+
   G4bool IsOpticalPhoton(const G4Track *track)
   {
     return track != nullptr &&
@@ -100,6 +102,112 @@ namespace
   {
     return phase == DetectorConstruction::Phase::BN ||
            phase == DetectorConstruction::Phase::ZnS;
+  }
+
+  G4bool IsReentryPhase(DetectorConstruction::Phase phase)
+  {
+    return IsParticlePhase(phase) ||
+           phase == DetectorConstruction::Phase::Matrix;
+  }
+
+  std::string PhaseLabel(DetectorConstruction::Phase phase)
+  {
+    if (phase == DetectorConstruction::Phase::Unknown)
+      return "Unknown";
+    return DetectorConstruction::PhaseName(phase);
+  }
+
+  G4bool ComputeExitPointOnRveBox(const G4ThreeVector &prePos,
+                                  const G4ThreeVector &oldDir,
+                                  const DetectorConstruction *detector,
+                                  G4ThreeVector &exitPoint)
+  {
+    if (detector == nullptr || oldDir.mag2() <= 0.0)
+      return false;
+
+    const G4double halfX = detector->GetPatchHalfXUm() * um;
+    const G4double halfY = detector->GetPatchHalfYUm() * um;
+    const G4double halfZ = detector->GetPatchHalfZUm() * um;
+
+    G4double tMin = -std::numeric_limits<G4double>::infinity();
+    G4double tMax = std::numeric_limits<G4double>::infinity();
+
+    auto updateAxis = [&](G4double pos, G4double dir, G4double half) -> G4bool
+    {
+      if (std::abs(dir) <= 1.0e-18)
+        return std::abs(pos) <= half;
+
+      G4double t1 = (-half - pos) / dir;
+      G4double t2 = (+half - pos) / dir;
+      if (t1 > t2)
+        std::swap(t1, t2);
+      tMin = std::max(tMin, t1);
+      tMax = std::min(tMax, t2);
+      return tMin <= tMax;
+    };
+
+    if (!updateAxis(prePos.x(), oldDir.x(), halfX) ||
+        !updateAxis(prePos.y(), oldDir.y(), halfY) ||
+        !updateAxis(prePos.z(), oldDir.z(), halfZ))
+    {
+      return false;
+    }
+
+    if (tMax <= 0.0 || !std::isfinite(tMax))
+      return false;
+
+    exitPoint = prePos + tMax * oldDir;
+    return true;
+  }
+
+  StageDReentryDiagnosticRecord MakeReentryDiagnosticRecord(
+      const StageDReentrySampler::ReentryContext &ctx,
+      const StageDReentrySampler::ReentryDiagnostics &diag)
+  {
+    StageDReentryDiagnosticRecord record;
+    record.event_id = ctx.eventID;
+    record.reentry_index = ctx.reentryIndex;
+    record.strategy = diag.strategy;
+    record.fallback_level = diag.fallbackLevel;
+    record.exit_phase = PhaseLabel(diag.exitPhase);
+    record.entry_phase = PhaseLabel(diag.entryPhase);
+    record.old_dir = ctx.oldDir;
+    record.exit_point = ctx.exitPoint;
+    record.entry_point = diag.entryPoint;
+    record.particle_q_exit = diag.particleQExit;
+    record.particle_q_entry = diag.particleQEntry;
+    record.particle_mu_exit = diag.particleMuExit;
+    record.particle_mu_entry = diag.particleMuEntry;
+    record.matrix_clearance_exit_um = diag.matrixClearanceExitUm;
+    record.matrix_clearance_entry_um = diag.matrixClearanceEntryUm;
+    record.matrix_nearest_phase_exit = diag.matrixNearestPhaseExit;
+    record.matrix_nearest_phase_entry = diag.matrixNearestPhaseEntry;
+    record.matrix_clearance_bin_exit = diag.matrixClearanceBinExit;
+    record.matrix_clearance_bin_entry = diag.matrixClearanceBinEntry;
+    record.trials = diag.trials;
+    return record;
+  }
+
+  void AccumulateReentryCounters(StageDPhotonEventRecord &event,
+                                 const StageDReentrySampler::ReentryDiagnostics &diag)
+  {
+    if (diag.strategy == "particle_sphere_q_mu")
+      ++event.num_reentry_particle_q_mu;
+    else if (diag.strategy == "matrix_clearance_binned_portal")
+      ++event.num_reentry_matrix_clearance_portal;
+    else if (diag.strategy == "matrix_random_debug")
+      ++event.num_reentry_random_matrix_debug;
+
+    if (diag.fallbackLevel == "same_bin")
+      ++event.num_reentry_fallback_same_bin;
+    else if (diag.fallbackLevel == "adjacent_bin")
+      ++event.num_reentry_fallback_adjacent_bin;
+    else if (diag.fallbackLevel == "same_phase_any_bin")
+      ++event.num_reentry_fallback_any_bin;
+    else if (diag.fallbackLevel == "any_phase_same_bin")
+      ++event.num_reentry_fallback_any_phase_same_bin;
+    else if (diag.fallbackLevel == "any_portal")
+      ++event.num_reentry_fallback_any_portal;
   }
 
   G4int PhaseFunctionBin(const G4double cosTheta)
@@ -180,32 +288,62 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
   }
 
   if (fReentrySampler == nullptr)
-    fReentrySampler = new StageDReentrySampler(detector);
+  {
+    fReentrySampler = new StageDReentrySampler(detector, fConfig);
+    if (fRunAction != nullptr)
+      fRunAction->SetReentryPortalSummary(fReentrySampler->GetPortalSummary());
+  }
 
-  const G4ThreeVector insidePos = step->GetPreStepPoint()->GetPosition();
-  const auto phase = detector->FindPhaseAtPoint(insidePos);
+  const G4ThreeVector prePos = step->GetPreStepPoint()->GetPosition();
   const G4ThreeVector oldDir = step->GetPreStepPoint()->GetMomentumDirection();
+  G4ThreeVector exitPoint = prePos;
+  ComputeExitPointOnRveBox(prePos, oldDir, detector, exitPoint);
+  const G4ThreeVector exitInsidePoint = exitPoint - kBoundaryEpsilon * oldDir.unit();
+
+  auto phase = fReentrySampler->FastPhaseAtPointForReentry(exitInsidePoint);
+  if (phase == DetectorConstruction::Phase::World ||
+      phase == DetectorConstruction::Phase::Unknown)
+  {
+    phase = fReentrySampler->FastPhaseAtPointForReentry(prePos);
+  }
+
+  StageDReentrySampler::ReentryContext ctx;
+  ctx.phase = phase;
+  ctx.prePos = prePos;
+  ctx.postPos = postPos;
+  ctx.oldDir = oldDir;
+  ctx.exitPoint = exitPoint;
+  ctx.exitInsidePoint = exitInsidePoint;
+  ctx.wavelengthNm = event.wavelength_nm;
+  ctx.eventID = event.photonID;
+  ctx.reentryIndex = event.num_reentry + event.num_reentry_failed + 1;
+
+  StageDReentrySampler::ReentryDiagnostics diag;
+  diag.exitPhase = phase;
+  diag.exitInsidePoint = exitInsidePoint;
+
+  if (!IsReentryPhase(phase))
+  {
+    diag.strategy = "phase_resolve_failed";
+    diag.fallbackLevel = "unsupported_exit_phase";
+    if (fRunAction != nullptr)
+      fRunAction->RecordReentryDiagnostic(MakeReentryDiagnosticRecord(ctx, diag));
+    ++event.num_reentry_failed;
+    event.in_particle_segment = false;
+    event.particle_segment_phase.clear();
+    fEventAction->SetFinalStatus("reentry_failed", false);
+    track->SetTrackStatus(fStopAndKill);
+    return true;
+  }
 
   G4ThreeVector newPosition;
-  G4bool ok = false;
-  if (phase == DetectorConstruction::Phase::BN ||
-      phase == DetectorConstruction::Phase::ZnS)
-  {
-    ok = fReentrySampler->SampleSamePhaseSphereReentry(
-        phase,
-        insidePos,
-        fConfig->stageD_reentry_mode,
-        newPosition);
-  }
-  else if (phase == DetectorConstruction::Phase::Matrix)
-  {
-    ok = fReentrySampler->SampleMatrixReentry(
-        fConfig->stageD_matrix_reentry_mode,
-        newPosition);
-  }
+  const G4bool ok = fReentrySampler->SampleReentry(ctx, newPosition, diag);
+  if (fRunAction != nullptr)
+    fRunAction->RecordReentryDiagnostic(MakeReentryDiagnosticRecord(ctx, diag));
 
   if (!ok)
   {
+    ++event.num_reentry_failed;
     event.in_particle_segment = false;
     event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("reentry_failed", false);
@@ -232,6 +370,7 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
   if (stackManager == nullptr)
   {
     delete continuationTrack;
+    ++event.num_reentry_failed;
     event.in_particle_segment = false;
     event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("reentry_failed", false);
@@ -247,6 +386,7 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
     ++event.num_reentry_ZnS;
   else if (phase == DetectorConstruction::Phase::Matrix)
     ++event.num_reentry_matrix;
+  AccumulateReentryCounters(event, diag);
 
   event.in_particle_segment = false;
   event.particle_segment_phase.clear();

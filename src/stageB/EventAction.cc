@@ -66,7 +66,7 @@ void EventAction::BeginOfEventAction(const G4Event *event)
 
   if (fRunAction && fPrimaryAction)
   {
-    fRunAction->SwitchOutputCsvForInputPath(fPrimaryAction->GetLoadedInputFile());
+    fRunAction->SwitchOutputCsvForInputPath(fPrimaryAction->GetCurrentRecordInputFile());
     fRunAction->AppendCaptureAnchor(MakeCurrentCaptureAnchorRow());
   }
 }

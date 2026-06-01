@@ -100,14 +100,20 @@ def parse_args():
     )
     parser.add_argument(
         "--reentry-mode",
-        default="same_phase_rho_over_R",
-        choices=["same_phase_rho_over_R", "same_phase_random"],
+        default="state_matched",
+        choices=["state_matched", "same_phase_rho_over_R", "same_phase_random"],
         help="StageD same-phase re-entry mode.",
     )
     parser.add_argument(
+        "--particle-reentry-mode",
+        default="sphere_q_mu",
+        choices=["sphere_q_mu", "same_phase_rho_over_R", "same_phase_random"],
+        help="StageD particle re-entry mode.",
+    )
+    parser.add_argument(
         "--matrix-reentry-mode",
-        default="random_matrix",
-        choices=["random_matrix", "distance_matched_matrix"],
+        default="clearance_binned_portal",
+        choices=["clearance_binned_portal", "random_matrix_debug", "distance_matched_matrix", "random_matrix"],
         help="StageD matrix re-entry mode.",
     )
     parser.add_argument(
@@ -198,17 +204,39 @@ def normalize_requested_placement(raw: str) -> str:
     return raw if raw.endswith(".csv") else raw + ".csv"
 
 
+def placement_display_tag(path: Path, placement_dir: Path) -> str:
+    rel = path.resolve().relative_to(placement_dir.resolve())
+    suffix = rel.suffix
+    parts = list(rel.parts)
+    if suffix:
+        parts[-1] = rel.stem
+    return "__".join(parts)
+
+
 def resolve_placements(placement_dir: Path, requested):
     if not requested:
-        return sorted(placement_dir.glob("*.csv"))
+        return sorted(placement_dir.rglob("*.csv"))
 
     resolved = []
     for item in requested:
-        name = normalize_requested_placement(item)
+        name = normalize_requested_placement(item).replace("\\", "/")
         candidate = placement_dir / name
-        if not candidate.is_file():
-            raise SystemExit(f"Placement not found: {candidate}")
-        resolved.append(candidate)
+        if candidate.is_file():
+            resolved.append(candidate)
+            continue
+
+        matches = sorted(
+            path for path in placement_dir.rglob("*.csv")
+            if path.name == Path(name).name
+        )
+        if not matches:
+            raise SystemExit(f"Placement not found under {placement_dir}: {item}")
+        if len(matches) > 1:
+            raise SystemExit(
+                f"Placement name is ambiguous under {placement_dir}: {item}. "
+                "Pass a relative subpath from placement-dir."
+            )
+        resolved.append(matches[0])
     return resolved
 
 
@@ -222,6 +250,7 @@ def macro_text(
     source_mode: str,
     boundary_mode: str,
     reentry_mode: str,
+    particle_reentry_mode: str,
     matrix_reentry_mode: str,
     scatter_metric: str,
     target_primary_scatter: int,
@@ -244,6 +273,7 @@ def macro_text(
             f"/cfg/stageD/setSourceMode {source_mode}",
             f"/cfg/stageD/setBoundaryMode {boundary_mode}",
             f"/cfg/stageD/setReentryMode {reentry_mode}",
+            f"/cfg/stageD/setParticleReentryMode {particle_reentry_mode}",
             f"/cfg/stageD/setMatrixReentryMode {matrix_reentry_mode}",
             f"/cfg/stageD/setScatterMetric {scatter_metric}",
             f"/cfg/stageD/setTargetPrimaryScatter {target_primary_scatter}",
@@ -344,10 +374,10 @@ def main():
 
     for idx, placement in enumerate(placements, start=1):
         placement_rel_to_build = "../" + rel_to_project(placement, project_root)
-        placement_stem = placement.stem
-        macro_path = macro_dir / f"{placement_stem}_StageD_OpticalHomogenization.mac"
+        placement_tag = placement_display_tag(placement, placement_dir)
+        macro_path = macro_dir / f"{placement_tag}_StageD_OpticalHomogenization.mac"
         macro_rel_to_build = "../" + rel_to_project(macro_path, project_root)
-        log_path = log_dir / f"p{idx:04d}_{placement_stem}.log"
+        log_path = log_dir / f"p{idx:04d}_{placement_tag}.log"
 
         macro_path.write_text(
             macro_text(
@@ -360,6 +390,7 @@ def main():
                 source_mode=args.source_mode,
                 boundary_mode=args.boundary_mode,
                 reentry_mode=args.reentry_mode,
+                particle_reentry_mode=args.particle_reentry_mode,
                 matrix_reentry_mode=args.matrix_reentry_mode,
                 scatter_metric=args.scatter_metric,
                 target_primary_scatter=args.target_primary_scatter,
@@ -371,7 +402,7 @@ def main():
             encoding="utf-8",
         )
 
-        print(f"[{idx}/{len(placements)}] {placement.name}")
+        print(f"[{idx}/{len(placements)}] {placement.relative_to(placement_dir)}")
         print(f"  macro: {macro_path}")
         print(f"  log:   {log_path}")
         print(f"  cmd:   cd {build_dir} && ./{args.executable_name} {macro_rel_to_build}")

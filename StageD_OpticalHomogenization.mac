@@ -8,14 +8,18 @@
 /cfg/stageD/setWavelengthNm 450
 /cfg/stageD/setSourceMode uniform_ZnS
 /cfg/stageD/setBoundaryMode same_phase_reentry
-/cfg/stageD/setReentryMode same_phase_rho_over_R
-/cfg/stageD/setMatrixReentryMode random_matrix
+/cfg/stageD/setReentryMode state_matched
+/cfg/stageD/setParticleReentryMode sphere_q_mu
+/cfg/stageD/setMatrixReentryMode clearance_binned_portal
 /cfg/stageD/setScatterMetric step_angle_threshold
 /cfg/stageD/setTargetPrimaryScatter 160
 /cfg/stageD/setThetaThresholdDeg 0.10
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000
 /cfg/stageD/setMaxPathLengthUm 5000
+/cfg/stageD/setPortalNu 128
+/cfg/stageD/setPortalNv 128
+/cfg/stageD/setClearanceBinEdgesUm 0.02 0.10 0.50
 
 /run/initialize
 /run/beamOn 1000

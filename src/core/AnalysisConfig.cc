@@ -213,12 +213,13 @@ AnalysisConfig::AnalysisConfig()
       opticalBnRIndex(2.1),
       opticalBnAbsLengthUm(1.0e5),
       opticalZnsRIndex(2.36),
-      opticalZnsAbsLengthUm(1.15e3),
+      opticalZnsAbsLengthUm(1.4e3),
       stageD_wavelength_nm(450.0),
       stageD_source_mode("uniform_ZnS"),
       stageD_boundary_mode("same_phase_reentry"),
-      stageD_reentry_mode("same_phase_rho_over_R"),
-      stageD_matrix_reentry_mode("random_matrix"),
+      stageD_reentry_mode("state_matched"),
+      stageD_particle_reentry_mode("sphere_q_mu"),
+      stageD_matrix_reentry_mode("clearance_binned_portal"),
       stageD_scatter_metric("particle_encounter_no_threshold"),
       stageD_target_primary_scatter(160),
       stageD_theta_threshold_deg(0.10),
@@ -226,6 +227,14 @@ AnalysisConfig::AnalysisConfig()
       stageD_max_steps(100000),
       stageD_max_path_length_um(5000.0),
       stageD_output_dir(""),
+      stageD_portal_nu(128),
+      stageD_portal_nv(128),
+      stageD_portal_margin_um(0.0),
+      stageD_clearance_bin0_um(0.02),
+      stageD_clearance_bin1_um(0.10),
+      stageD_clearance_bin2_um(0.50),
+      stageD_max_particle_reentry_trials(64),
+      stageD_max_portal_fallback_level(4),
       allowThicknessEqualLocalPatch(true)
 {
   const char *runModeEnv = std::getenv("BNZS_RUN_MODE");
@@ -398,6 +407,10 @@ AnalysisConfig::AnalysisConfig()
   readPositiveIntEnv("BNZS_STAGED_MAX_REENTRY", stageD_max_reentry);
   readPositiveIntEnv("BNZS_STAGED_MAX_STEPS", stageD_max_steps);
   readPositiveIntEnv("BNZS_STAGED_TARGET_PRIMARY_SCATTER", stageD_target_primary_scatter);
+  readPositiveIntEnv("BNZS_STAGED_PORTAL_NU", stageD_portal_nu);
+  readPositiveIntEnv("BNZS_STAGED_PORTAL_NV", stageD_portal_nv);
+  readPositiveIntEnv("BNZS_STAGED_MAX_PARTICLE_REENTRY_TRIALS", stageD_max_particle_reentry_trials);
+  readPositiveIntEnv("BNZS_STAGED_MAX_PORTAL_FALLBACK_LEVEL", stageD_max_portal_fallback_level);
 
   const char *stageDSourceModeEnv = std::getenv("BNZS_STAGED_SOURCE_MODE");
   if (stageDSourceModeEnv != nullptr && std::string(stageDSourceModeEnv).size() > 0)
@@ -411,6 +424,10 @@ AnalysisConfig::AnalysisConfig()
   if (stageDReentryModeEnv != nullptr && std::string(stageDReentryModeEnv).size() > 0)
     stageD_reentry_mode = stageDReentryModeEnv;
 
+  const char *stageDParticleReentryModeEnv = std::getenv("BNZS_STAGED_PARTICLE_REENTRY_MODE");
+  if (stageDParticleReentryModeEnv != nullptr && std::string(stageDParticleReentryModeEnv).size() > 0)
+    stageD_particle_reentry_mode = stageDParticleReentryModeEnv;
+
   const char *stageDMatrixReentryModeEnv = std::getenv("BNZS_STAGED_MATRIX_REENTRY_MODE");
   if (stageDMatrixReentryModeEnv != nullptr && std::string(stageDMatrixReentryModeEnv).size() > 0)
     stageD_matrix_reentry_mode = stageDMatrixReentryModeEnv;
@@ -422,6 +439,11 @@ AnalysisConfig::AnalysisConfig()
   const char *stageDOutputDirEnv = std::getenv("BNZS_STAGED_OUTPUT_DIR");
   if (stageDOutputDirEnv != nullptr && std::string(stageDOutputDirEnv).size() > 0)
     stageD_output_dir = stageDOutputDirEnv;
+
+  readOpticalDoubleEnv("BNZS_STAGED_PORTAL_MARGIN_UM", stageD_portal_margin_um);
+  readOpticalDoubleEnv("BNZS_STAGED_CLEARANCE_BIN0_UM", stageD_clearance_bin0_um);
+  readOpticalDoubleEnv("BNZS_STAGED_CLEARANCE_BIN1_UM", stageD_clearance_bin1_um);
+  readOpticalDoubleEnv("BNZS_STAGED_CLEARANCE_BIN2_UM", stageD_clearance_bin2_um);
 
   const char *bnWtEnv = std::getenv("BNZS_BN_WT");
   const char *znsWtEnv = std::getenv("BNZS_ZNS_WT");
