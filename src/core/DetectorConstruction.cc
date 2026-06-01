@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -589,6 +590,10 @@ namespace
     if (allParts.empty())
       return;
 
+    G4int reducedGapPairCount = 0;
+    G4double minPositiveClearance = std::numeric_limits<G4double>::infinity();
+    G4double maxGapShortfall = 0.0;
+
     // 1. 构建网格
     const G4double maxRadius = std::max(bnRadius, znsRadius);
     const G4double cellSize = 2.0 * maxRadius + overlapGap;
@@ -638,14 +643,39 @@ namespace
                     if (i >= j)
                       continue; // 避免重复比较和自己比自己
 
-                    const G4double reqDist = allParts[i].radius + allParts[j].radius + overlapGap;
-                    const G4double tolReqDist =
-                        std::max(0.0, reqDist - kPlacementOverlapTolerance);
-                    if ((allParts[i].pos - allParts[j].pos).mag2() < tolReqDist * tolReqDist)
+                    const G4double touchingDist =
+                        allParts[i].radius + allParts[j].radius;
+                    const G4double preferredDist = touchingDist + overlapGap;
+                    const G4double dist2 =
+                        (allParts[i].pos - allParts[j].pos).mag2();
+                    const G4double hardMinDist =
+                        std::max(0.0, touchingDist - kPlacementOverlapTolerance);
+
+                    if (dist2 < hardMinDist * hardMinDist)
                     {
+                      const G4double dist = std::sqrt(dist2);
+                      const G4double clearance = dist - touchingDist;
+                      std::ostringstream oss;
+                      oss << "Overlap detected in placement CSV! "
+                          << "surface clearance = " << clearance / um
+                          << " um, but must be >= 0 within tolerance.";
                       G4Exception("DetectorConstruction::Construct",
                                   "BNZS207", FatalException,
-                                  "Overlap detected in placement CSV! Fast check failed.");
+                                  oss.str().c_str());
+                    }
+
+                    const G4double softMinDist =
+                        std::max(0.0, preferredDist - kPlacementOverlapTolerance);
+                    if (overlapGap > 0.0 && dist2 < softMinDist * softMinDist)
+                    {
+                      const G4double dist = std::sqrt(dist2);
+                      const G4double clearance = dist - touchingDist;
+                      if (clearance >= -kPlacementOverlapTolerance)
+                      {
+                        ++reducedGapPairCount;
+                        minPositiveClearance = std::min(minPositiveClearance, clearance);
+                        maxGapShortfall = std::max(maxGapShortfall, overlapGap - clearance);
+                      }
                     }
                   }
                 }
@@ -654,6 +684,22 @@ namespace
           }
         }
       }
+    }
+
+    if (reducedGapPairCount > 0)
+    {
+      G4cerr << "[DetectorConstruction] Warning: placement contains "
+             << reducedGapPairCount
+             << " particle pairs whose surface clearance stays non-negative but is below the "
+             << "configured overlapGap."
+             << " min_clearance=" << minPositiveClearance / um
+             << " um"
+             << " overlapGap=" << overlapGap / um
+             << " um"
+             << " max_shortfall=" << maxGapShortfall / um
+             << " um"
+             << ". Continuing because only true overlaps are fatal."
+             << G4endl;
     }
   }
 
