@@ -399,6 +399,15 @@ Stage B 现在默认优先从以下位置读取俘获记录：
 Input/stageA/<ratio>/neutron_capture_positions/*_neutron_capture_positions.csv
 ```
 
+推荐的 Stage B 输入表头至少应包含：
+
+```text
+eventID,thickness_um,bn_wt,zns_wt,capture_x_um,capture_y_um,source_x_um,source_y_um,depth_um
+```
+
+当前代码会优先读取 `source_x_um` 和 `source_y_um`，
+同时向后兼容旧字段 `corr_x_um` 和 `corr_y_um`。
+
 向后兼容的旧路径仍保留为回退：
 
 ```text
@@ -468,6 +477,7 @@ Output/stageB/<ratio>/<thickness>_boundary_stop_summary.csv
 `capture_anchors.csv` 保留所有 replay trajectory，
 即使某条 trajectory 没有任何 ZnS step；
 `zns_track_steps.csv` 只保留 `phase_pre == "ZnS"` 且 `step_len_um > 0` 的 alpha/Li 轨迹段。
+其中宏观源点坐标列名已统一为 `source_x_um` 和 `source_y_um`。
 
 legacy 调试模式 `BNZS_STAGEB_OUTPUT_MODE=full` 仍会输出：
 
