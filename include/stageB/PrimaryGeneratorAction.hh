@@ -23,8 +23,8 @@ struct CaptureRecord
   G4double zns_wt = 0.0;
   G4double capture_x_um = 0.0;
   G4double capture_y_um = 0.0;
-  G4double corr_x_um = 0.0;
-  G4double corr_y_um = 0.0;
+  G4double source_x_um = 0.0;
+  G4double source_y_um = 0.0;
   G4double depth_um = 0.0;
 };
 

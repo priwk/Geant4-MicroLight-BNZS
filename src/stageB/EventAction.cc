@@ -86,8 +86,8 @@ RunAction::CaptureAnchorRow EventAction::MakeCurrentCaptureAnchorRow() const
   row.zns_wt = fCurrentRecord.zns_wt;
   row.capture_x_um = fCurrentRecord.capture_x_um;
   row.capture_y_um = fCurrentRecord.capture_y_um;
-  row.corr_x_um = fCurrentRecord.corr_x_um;
-  row.corr_y_um = fCurrentRecord.corr_y_um;
+  row.source_x_um = fCurrentRecord.source_x_um;
+  row.source_y_um = fCurrentRecord.source_y_um;
   row.depth_um = fCurrentRecord.depth_um;
   row.local_capture_x_um = fCurrentLocalCapturePosition.x() / um;
   row.local_capture_y_um = fCurrentLocalCapturePosition.y() / um;

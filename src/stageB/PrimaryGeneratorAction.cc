@@ -513,12 +513,16 @@ G4bool PrimaryGeneratorAction::ParseOneRecordLine(
   const std::string znsWt = field("zns_wt");
   const std::string captureX = field("capture_x_um");
   const std::string captureY = field("capture_y_um");
-  const std::string corrX = field("corr_x_um");
-  const std::string corrY = field("corr_y_um");
+  std::string sourceX = field("source_x_um");
+  std::string sourceY = field("source_y_um");
+  if (sourceX.empty())
+    sourceX = field("corr_x_um");
+  if (sourceY.empty())
+    sourceY = field("corr_y_um");
   const std::string depth = field("depth_um");
 
   if (eventID.empty() || thickness.empty() || bnWt.empty() || znsWt.empty() ||
-      captureX.empty() || captureY.empty() || corrX.empty() || corrY.empty() ||
+      captureX.empty() || captureY.empty() || sourceX.empty() || sourceY.empty() ||
       depth.empty())
   {
     return false;
@@ -532,8 +536,8 @@ G4bool PrimaryGeneratorAction::ParseOneRecordLine(
     rec.zns_wt = std::stod(znsWt);
     rec.capture_x_um = std::stod(captureX);
     rec.capture_y_um = std::stod(captureY);
-    rec.corr_x_um = std::stod(corrX);
-    rec.corr_y_um = std::stod(corrY);
+    rec.source_x_um = std::stod(sourceX);
+    rec.source_y_um = std::stod(sourceY);
     rec.depth_um = std::stod(depth);
   }
   catch (...)
