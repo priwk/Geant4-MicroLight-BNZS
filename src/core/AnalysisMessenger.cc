@@ -113,12 +113,16 @@ namespace
         value == "encounter" ||
         value == "particle_encounter")
       return "particle_encounter_no_threshold";
+    if (value == "angle_threshold" ||
+        value == "particle_encounter_angle_threshold" ||
+        value == "particleencounteranglethreshold" ||
+        value == "step_angle_threshold" ||
+        value == "stepanglethreshold")
+      return "particle_encounter_angle_threshold";
     if (value == "boundary_deflection" || value == "boundarydeflection")
       return "boundary_deflection";
     if (value == "particle_exit_deflection" || value == "particleexitdeflection")
       return "particle_exit_deflection";
-    if (value == "step_angle_threshold" || value == "stepanglethreshold")
-      return "step_angle_threshold";
     return "";
   }
 
@@ -389,16 +393,16 @@ AnalysisMessenger::AnalysisMessenger(AnalysisConfig *config)
 
   fStageDScatterMetricCmd = new G4UIcmdWithAString("/cfg/stageD/setScatterMetric", this);
   fStageDScatterMetricCmd->SetGuidance(
-      "Set Stage D scatter metric label. Primary output always uses particle_encounter_no_threshold; "
-      "legacy/debug labels may use boundary_deflection | particle_exit_deflection | step_angle_threshold.");
+      "Set Stage D primary scatter metric: particle_encounter_angle_threshold | angle_threshold | "
+      "particle_encounter_no_threshold. Legacy/debug labels: boundary_deflection | particle_exit_deflection.");
   fStageDScatterMetricCmd->SetParameterName("scatterMetric", false);
   fStageDScatterMetricCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
   fStageDTargetPrimaryScatterCmd = new G4UIcmdWithAnInteger("/cfg/stageD/setTargetPrimaryScatter", this);
   fStageDTargetPrimaryScatterCmd->SetGuidance(
-      "Set Stage D target number of primary scatter events per photon before early stop.");
+      "Set Stage D target number of primary scatter events per photon before early stop. Use 0 to disable.");
   fStageDTargetPrimaryScatterCmd->SetParameterName("targetPrimaryScatter", false);
-  fStageDTargetPrimaryScatterCmd->SetRange("targetPrimaryScatter>0");
+  fStageDTargetPrimaryScatterCmd->SetRange("targetPrimaryScatter>=0");
   fStageDTargetPrimaryScatterCmd->AvailableForStates(G4State_PreInit, G4State_Idle);
 
   fStageDThetaThresholdDegCmd = new G4UIcmdWithADouble("/cfg/stageD/setThetaThresholdDeg", this);
@@ -814,7 +818,7 @@ void AnalysisMessenger::SetNewValue(G4UIcommand *command, G4String newValue)
     {
       G4Exception("AnalysisMessenger::SetNewValue",
                   "BNZS_CFG_013", FatalException,
-                  "Stage D scatterMetric must be particle_encounter_no_threshold, boundary_deflection, particle_exit_deflection, or step_angle_threshold.");
+                  "Stage D scatterMetric must be particle_encounter_angle_threshold (or angle_threshold), particle_encounter_no_threshold, boundary_deflection, or particle_exit_deflection.");
       return;
     }
     fConfig->stageD_scatter_metric = normalized;

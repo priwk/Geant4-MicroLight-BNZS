@@ -78,6 +78,10 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
 {
   (void)event;
 
+  const G4bool useThresholdedEncounterMetric =
+      (fConfig != nullptr &&
+       fConfig->stageD_scatter_metric == "particle_encounter_angle_threshold");
+
   if (fCurrentEvent.final_status == "in_progress" ||
       fCurrentEvent.final_status == "continued_reentry")
     fCurrentEvent.final_status = "lost";
@@ -128,15 +132,42 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
 
   if (fCurrentEvent.num_encounter_total > 0)
   {
-    const G4double nEncounter =
+    const G4double nEncounterRaw =
         static_cast<G4double>(fCurrentEvent.num_encounter_total);
+    const G4double g1Raw =
+        fCurrentEvent.sum_cos_theta_encounter / nEncounterRaw;
+    const G4double meanCos2Raw =
+        fCurrentEvent.sum_cos2_theta_encounter / nEncounterRaw;
+    fCurrentEvent.g1_encounter_raw_for_this_photon = g1Raw;
+    fCurrentEvent.g2_encounter_raw_for_this_photon =
+        0.5 * (3.0 * meanCos2Raw - 1.0);
+  }
+  else
+  {
+    fCurrentEvent.g1_encounter_raw_for_this_photon = 0.0;
+    fCurrentEvent.g2_encounter_raw_for_this_photon = 0.0;
+  }
+
+  if (useThresholdedEncounterMetric &&
+      fCurrentEvent.num_encounter_effective_total > 0)
+  {
+    const G4double nEncounter =
+        static_cast<G4double>(fCurrentEvent.num_encounter_effective_total);
     const G4double g1 =
-        fCurrentEvent.sum_cos_theta_encounter / nEncounter;
+        fCurrentEvent.sum_cos_theta_encounter_effective / nEncounter;
     const G4double meanCos2 =
-        fCurrentEvent.sum_cos2_theta_encounter / nEncounter;
+        fCurrentEvent.sum_cos2_theta_encounter_effective / nEncounter;
     fCurrentEvent.g1_encounter_for_this_photon = g1;
     fCurrentEvent.g2_encounter_for_this_photon =
         0.5 * (3.0 * meanCos2 - 1.0);
+  }
+  else if (!useThresholdedEncounterMetric &&
+           fCurrentEvent.num_encounter_total > 0)
+  {
+    fCurrentEvent.g1_encounter_for_this_photon =
+        fCurrentEvent.g1_encounter_raw_for_this_photon;
+    fCurrentEvent.g2_encounter_for_this_photon =
+        fCurrentEvent.g2_encounter_raw_for_this_photon;
   }
   else
   {
@@ -148,9 +179,16 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
       fCurrentEvent.path_length_bn_um +
       fCurrentEvent.path_length_zns_um +
       fCurrentEvent.path_length_matrix_um;
-  fCurrentEvent.mu_s_prime_direct_encounter_per_um_for_this_photon =
+  fCurrentEvent.mu_s_prime_direct_encounter_raw_per_um_for_this_photon =
       (mediumPathLengthUm > 0.0)
           ? (fCurrentEvent.sum_one_minus_cos_theta_encounter / mediumPathLengthUm)
+          : 0.0;
+  fCurrentEvent.mu_s_prime_direct_encounter_per_um_for_this_photon =
+      (mediumPathLengthUm > 0.0)
+          ? ((useThresholdedEncounterMetric
+                  ? fCurrentEvent.sum_one_minus_cos_theta_encounter_effective
+                  : fCurrentEvent.sum_one_minus_cos_theta_encounter) /
+             mediumPathLengthUm)
           : 0.0;
 
   if (fRunAction != nullptr)

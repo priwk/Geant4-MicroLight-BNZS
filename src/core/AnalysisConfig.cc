@@ -60,6 +60,33 @@ namespace
     return v == "1" || v == "true" || v == "yes" || v == "on";
   }
 
+  std::string NormalizeStageDScatterMetric(std::string raw)
+  {
+    raw.erase(raw.begin(), std::find_if(raw.begin(), raw.end(), [](unsigned char ch)
+                                        { return !std::isspace(ch); }));
+    raw.erase(std::find_if(raw.rbegin(), raw.rend(), [](unsigned char ch)
+                           { return !std::isspace(ch); })
+                 .base(),
+             raw.end());
+    const std::string value = ToLowerCopy(raw);
+    if (value == "particle_encounter_no_threshold" ||
+        value == "particleencounternothreshold" ||
+        value == "encounter" ||
+        value == "particle_encounter")
+      return "particle_encounter_no_threshold";
+    if (value == "angle_threshold" ||
+        value == "particle_encounter_angle_threshold" ||
+        value == "particleencounteranglethreshold" ||
+        value == "step_angle_threshold" ||
+        value == "stepanglethreshold")
+      return "particle_encounter_angle_threshold";
+    if (value == "boundary_deflection" || value == "boundarydeflection")
+      return "boundary_deflection";
+    if (value == "particle_exit_deflection" || value == "particleexitdeflection")
+      return "particle_exit_deflection";
+    return raw;
+  }
+
   bool TryParseRatioFolderName(const std::string &name, double &bnWt, double &znsWt)
   {
     const std::size_t dashPos = name.find('-');
@@ -210,19 +237,19 @@ AnalysisConfig::AnalysisConfig()
       opticalParamsProvided(false),
       opticalMatrixRIndex(0.0),
       opticalMatrixAbsLengthUm(5.0e5),
-      opticalBnRIndex(2.1),
-      opticalBnAbsLengthUm(3.0e4),
-      opticalZnsRIndex(2.36),
-      opticalZnsAbsLengthUm(1.5e3),
+      opticalBnRIndex(1.98),
+      opticalBnAbsLengthUm(1.0e4),
+      opticalZnsRIndex(2.45),
+      opticalZnsAbsLengthUm(8.0e2),
       stageD_wavelength_nm(450.0),
-      stageD_source_mode("uniform_ZnS"),
+      stageD_source_mode("uniform_all_phase"),
       stageD_boundary_mode("same_phase_reentry"),
       stageD_reentry_mode("state_matched"),
       stageD_particle_reentry_mode("sphere_q_mu"),
       stageD_matrix_reentry_mode("clearance_binned_portal"),
-      stageD_scatter_metric("particle_encounter_no_threshold"),
-      stageD_target_primary_scatter(160),
-      stageD_theta_threshold_deg(0.10),
+      stageD_scatter_metric("particle_encounter_angle_threshold"),
+      stageD_target_primary_scatter(0),
+      stageD_theta_threshold_deg(0.5),
       stageD_max_reentry(10000),
       stageD_max_steps(100000),
       stageD_max_path_length_um(5000.0),
@@ -434,7 +461,7 @@ AnalysisConfig::AnalysisConfig()
 
   const char *stageDScatterMetricEnv = std::getenv("BNZS_STAGED_SCATTER_METRIC");
   if (stageDScatterMetricEnv != nullptr && std::string(stageDScatterMetricEnv).size() > 0)
-    stageD_scatter_metric = stageDScatterMetricEnv;
+    stageD_scatter_metric = NormalizeStageDScatterMetric(stageDScatterMetricEnv);
 
   const char *stageDOutputDirEnv = std::getenv("BNZS_STAGED_OUTPUT_DIR");
   if (stageDOutputDirEnv != nullptr && std::string(stageDOutputDirEnv).size() > 0)

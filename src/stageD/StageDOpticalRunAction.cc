@@ -42,6 +42,21 @@ namespace
     out += "\"";
     return out;
   }
+
+  G4bool UseThresholdedEncounterMetric(const AnalysisConfig *config)
+  {
+    return config != nullptr &&
+           config->stageD_scatter_metric == "particle_encounter_angle_threshold";
+  }
+
+  std::string PrimaryScatterMetricLabel(const AnalysisConfig *config)
+  {
+    if (!UseThresholdedEncounterMetric(config))
+      return "particle_encounter_no_threshold";
+    return config->stageD_scatter_metric.empty()
+               ? "particle_encounter_angle_threshold"
+               : config->stageD_scatter_metric;
+  }
 }
 
 StageDOpticalRunAction::StageDOpticalRunAction(AnalysisConfig *config)
@@ -182,18 +197,33 @@ void StageDOpticalRunAction::WriteEventHeader()
       << "num_encounter_total,"
       << "num_encounter_BN,"
       << "num_encounter_ZnS,"
+      << "num_encounter_effective_total,"
+      << "num_encounter_effective_BN,"
+      << "num_encounter_effective_ZnS,"
       << "sum_cos_theta_encounter,"
       << "sum_cos_theta_encounter_BN,"
       << "sum_cos_theta_encounter_ZnS,"
+      << "sum_cos_theta_encounter_effective,"
+      << "sum_cos_theta_encounter_effective_BN,"
+      << "sum_cos_theta_encounter_effective_ZnS,"
       << "sum_one_minus_cos_theta_encounter,"
       << "sum_one_minus_cos_theta_encounter_BN,"
       << "sum_one_minus_cos_theta_encounter_ZnS,"
+      << "sum_one_minus_cos_theta_encounter_effective,"
+      << "sum_one_minus_cos_theta_encounter_effective_BN,"
+      << "sum_one_minus_cos_theta_encounter_effective_ZnS,"
       << "sum_cos2_theta_encounter,"
       << "sum_cos2_theta_encounter_BN,"
       << "sum_cos2_theta_encounter_ZnS,"
+      << "sum_cos2_theta_encounter_effective,"
+      << "sum_cos2_theta_encounter_effective_BN,"
+      << "sum_cos2_theta_encounter_effective_ZnS,"
       << "g1_encounter_for_this_photon,"
       << "g2_encounter_for_this_photon,"
       << "mu_s_prime_direct_encounter_per_um_for_this_photon,"
+      << "g1_encounter_raw_for_this_photon,"
+      << "g2_encounter_raw_for_this_photon,"
+      << "mu_s_prime_direct_encounter_raw_per_um_for_this_photon,"
       << "num_particle_scatter_legacy,"
       << "num_particle_scatter_BN_legacy,"
       << "num_particle_scatter_ZnS_legacy,"
@@ -369,18 +399,33 @@ void StageDOpticalRunAction::RecordPhotonEvent(const StageDPhotonEventRecord &ev
       << event.num_encounter_total << ","
       << event.num_encounter_BN << ","
       << event.num_encounter_ZnS << ","
+      << event.num_encounter_effective_total << ","
+      << event.num_encounter_effective_BN << ","
+      << event.num_encounter_effective_ZnS << ","
       << event.sum_cos_theta_encounter << ","
       << event.sum_cos_theta_encounter_BN << ","
       << event.sum_cos_theta_encounter_ZnS << ","
+      << event.sum_cos_theta_encounter_effective << ","
+      << event.sum_cos_theta_encounter_effective_BN << ","
+      << event.sum_cos_theta_encounter_effective_ZnS << ","
       << event.sum_one_minus_cos_theta_encounter << ","
       << event.sum_one_minus_cos_theta_encounter_BN << ","
       << event.sum_one_minus_cos_theta_encounter_ZnS << ","
+      << event.sum_one_minus_cos_theta_encounter_effective << ","
+      << event.sum_one_minus_cos_theta_encounter_effective_BN << ","
+      << event.sum_one_minus_cos_theta_encounter_effective_ZnS << ","
       << event.sum_cos2_theta_encounter << ","
       << event.sum_cos2_theta_encounter_BN << ","
       << event.sum_cos2_theta_encounter_ZnS << ","
+      << event.sum_cos2_theta_encounter_effective << ","
+      << event.sum_cos2_theta_encounter_effective_BN << ","
+      << event.sum_cos2_theta_encounter_effective_ZnS << ","
       << event.g1_encounter_for_this_photon << ","
       << event.g2_encounter_for_this_photon << ","
       << event.mu_s_prime_direct_encounter_per_um_for_this_photon << ","
+      << event.g1_encounter_raw_for_this_photon << ","
+      << event.g2_encounter_raw_for_this_photon << ","
+      << event.mu_s_prime_direct_encounter_raw_per_um_for_this_photon << ","
       << event.num_particle_scatter << ","
       << event.num_particle_scatter_BN << ","
       << event.num_particle_scatter_ZnS << ","
@@ -491,11 +536,27 @@ void StageDOpticalRunAction::WriteSummaryFile() const
   G4long totalEncounter = 0;
   G4long totalEncounterBN = 0;
   G4long totalEncounterZnS = 0;
+  G4long totalEncounterEffective = 0;
+  G4long totalEncounterEffectiveBN = 0;
+  G4long totalEncounterEffectiveZnS = 0;
   G4double sumCosThetaEncounter = 0.0;
   G4double sumCosThetaEncounterBN = 0.0;
   G4double sumCosThetaEncounterZnS = 0.0;
+  G4double sumCosThetaEncounterEffective = 0.0;
+  G4double sumCosThetaEncounterEffectiveBN = 0.0;
+  G4double sumCosThetaEncounterEffectiveZnS = 0.0;
   G4double sumOneMinusCosThetaEncounter = 0.0;
+  G4double sumOneMinusCosThetaEncounterBN = 0.0;
+  G4double sumOneMinusCosThetaEncounterZnS = 0.0;
+  G4double sumOneMinusCosThetaEncounterEffective = 0.0;
+  G4double sumOneMinusCosThetaEncounterEffectiveBN = 0.0;
+  G4double sumOneMinusCosThetaEncounterEffectiveZnS = 0.0;
   G4double sumCos2ThetaEncounter = 0.0;
+  G4double sumCos2ThetaEncounterBN = 0.0;
+  G4double sumCos2ThetaEncounterZnS = 0.0;
+  G4double sumCos2ThetaEncounterEffective = 0.0;
+  G4double sumCos2ThetaEncounterEffectiveBN = 0.0;
+  G4double sumCos2ThetaEncounterEffectiveZnS = 0.0;
   std::array<G4long, StageDPhotonEventRecord::kPhaseFunctionBins> phaseFunctionCounts{};
   G4long totalParticleScatter = 0;
   G4long totalParticleScatterBN = 0;
@@ -555,11 +616,27 @@ void StageDOpticalRunAction::WriteSummaryFile() const
     totalEncounter += event.num_encounter_total;
     totalEncounterBN += event.num_encounter_BN;
     totalEncounterZnS += event.num_encounter_ZnS;
+    totalEncounterEffective += event.num_encounter_effective_total;
+    totalEncounterEffectiveBN += event.num_encounter_effective_BN;
+    totalEncounterEffectiveZnS += event.num_encounter_effective_ZnS;
     sumCosThetaEncounter += event.sum_cos_theta_encounter;
     sumCosThetaEncounterBN += event.sum_cos_theta_encounter_BN;
     sumCosThetaEncounterZnS += event.sum_cos_theta_encounter_ZnS;
+    sumCosThetaEncounterEffective += event.sum_cos_theta_encounter_effective;
+    sumCosThetaEncounterEffectiveBN += event.sum_cos_theta_encounter_effective_BN;
+    sumCosThetaEncounterEffectiveZnS += event.sum_cos_theta_encounter_effective_ZnS;
     sumOneMinusCosThetaEncounter += event.sum_one_minus_cos_theta_encounter;
+    sumOneMinusCosThetaEncounterBN += event.sum_one_minus_cos_theta_encounter_BN;
+    sumOneMinusCosThetaEncounterZnS += event.sum_one_minus_cos_theta_encounter_ZnS;
+    sumOneMinusCosThetaEncounterEffective += event.sum_one_minus_cos_theta_encounter_effective;
+    sumOneMinusCosThetaEncounterEffectiveBN += event.sum_one_minus_cos_theta_encounter_effective_BN;
+    sumOneMinusCosThetaEncounterEffectiveZnS += event.sum_one_minus_cos_theta_encounter_effective_ZnS;
     sumCos2ThetaEncounter += event.sum_cos2_theta_encounter;
+    sumCos2ThetaEncounterBN += event.sum_cos2_theta_encounter_BN;
+    sumCos2ThetaEncounterZnS += event.sum_cos2_theta_encounter_ZnS;
+    sumCos2ThetaEncounterEffective += event.sum_cos2_theta_encounter_effective;
+    sumCos2ThetaEncounterEffectiveBN += event.sum_cos2_theta_encounter_effective_BN;
+    sumCos2ThetaEncounterEffectiveZnS += event.sum_cos2_theta_encounter_effective_ZnS;
     for (std::size_t i = 0; i < phaseFunctionCounts.size(); ++i)
       phaseFunctionCounts[i] += event.phase_function_histogram[i];
 
@@ -617,31 +694,75 @@ void StageDOpticalRunAction::WriteSummaryFile() const
                                       ? static_cast<G4double>(nAbsorbedMatrix) / totalPathLengthMatrixUm
                                       : 0.0;
 
+  const G4bool useThresholdedEncounterMetric =
+      UseThresholdedEncounterMetric(fConfig);
+  const G4long primaryEncounterCount =
+      useThresholdedEncounterMetric ? totalEncounterEffective : totalEncounter;
+  const G4long primaryEncounterCountBN =
+      useThresholdedEncounterMetric ? totalEncounterEffectiveBN : totalEncounterBN;
+  const G4long primaryEncounterCountZnS =
+      useThresholdedEncounterMetric ? totalEncounterEffectiveZnS : totalEncounterZnS;
+  const G4double primarySumCosThetaEncounter =
+      useThresholdedEncounterMetric ? sumCosThetaEncounterEffective : sumCosThetaEncounter;
+  const G4double primarySumCosThetaEncounterBN =
+      useThresholdedEncounterMetric ? sumCosThetaEncounterEffectiveBN : sumCosThetaEncounterBN;
+  const G4double primarySumCosThetaEncounterZnS =
+      useThresholdedEncounterMetric ? sumCosThetaEncounterEffectiveZnS : sumCosThetaEncounterZnS;
+  const G4double primarySumOneMinusCosThetaEncounter =
+      useThresholdedEncounterMetric ? sumOneMinusCosThetaEncounterEffective : sumOneMinusCosThetaEncounter;
+  const G4double primarySumCos2ThetaEncounter =
+      useThresholdedEncounterMetric ? sumCos2ThetaEncounterEffective : sumCos2ThetaEncounter;
+
   const G4double muSEncounter = (totalMediumPathLengthUm > 0.0)
-                                    ? static_cast<G4double>(totalEncounter) / totalMediumPathLengthUm
+                                    ? static_cast<G4double>(primaryEncounterCount) / totalMediumPathLengthUm
                                     : 0.0;
   const G4double muSEncounterBN = (totalMediumPathLengthUm > 0.0)
-                                      ? static_cast<G4double>(totalEncounterBN) / totalMediumPathLengthUm
+                                      ? static_cast<G4double>(primaryEncounterCountBN) / totalMediumPathLengthUm
                                       : 0.0;
   const G4double muSEncounterZnS = (totalMediumPathLengthUm > 0.0)
+                                       ? static_cast<G4double>(primaryEncounterCountZnS) / totalMediumPathLengthUm
+                                       : 0.0;
+  const G4double muSEncounterRaw = (totalMediumPathLengthUm > 0.0)
+                                    ? static_cast<G4double>(totalEncounter) / totalMediumPathLengthUm
+                                    : 0.0;
+  const G4double muSEncounterRawBN = (totalMediumPathLengthUm > 0.0)
+                                      ? static_cast<G4double>(totalEncounterBN) / totalMediumPathLengthUm
+                                      : 0.0;
+  const G4double muSEncounterRawZnS = (totalMediumPathLengthUm > 0.0)
                                        ? static_cast<G4double>(totalEncounterZnS) / totalMediumPathLengthUm
                                        : 0.0;
-  const G4double g1Encounter = (totalEncounter > 0)
-                                   ? sumCosThetaEncounter / static_cast<G4double>(totalEncounter)
+  const G4double g1Encounter = (primaryEncounterCount > 0)
+                                   ? primarySumCosThetaEncounter / static_cast<G4double>(primaryEncounterCount)
                                    : 0.0;
-  const G4double g1EncounterBN = (totalEncounterBN > 0)
-                                     ? sumCosThetaEncounterBN / static_cast<G4double>(totalEncounterBN)
+  const G4double g1EncounterBN = (primaryEncounterCountBN > 0)
+                                     ? primarySumCosThetaEncounterBN / static_cast<G4double>(primaryEncounterCountBN)
                                      : 0.0;
-  const G4double g1EncounterZnS = (totalEncounterZnS > 0)
-                                      ? sumCosThetaEncounterZnS / static_cast<G4double>(totalEncounterZnS)
+  const G4double g1EncounterZnS = (primaryEncounterCountZnS > 0)
+                                      ? primarySumCosThetaEncounterZnS / static_cast<G4double>(primaryEncounterCountZnS)
                                       : 0.0;
-  const G4double meanCos2Encounter = (totalEncounter > 0)
-                                         ? sumCos2ThetaEncounter / static_cast<G4double>(totalEncounter)
+  const G4double g1EncounterRaw = (totalEncounter > 0)
+                                      ? sumCosThetaEncounter / static_cast<G4double>(totalEncounter)
+                                      : 0.0;
+  const G4double g1EncounterRawBN = (totalEncounterBN > 0)
+                                        ? sumCosThetaEncounterBN / static_cast<G4double>(totalEncounterBN)
+                                        : 0.0;
+  const G4double g1EncounterRawZnS = (totalEncounterZnS > 0)
+                                         ? sumCosThetaEncounterZnS / static_cast<G4double>(totalEncounterZnS)
                                          : 0.0;
+  const G4double meanCos2Encounter = (primaryEncounterCount > 0)
+                                         ? primarySumCos2ThetaEncounter / static_cast<G4double>(primaryEncounterCount)
+                                         : 0.0;
+  const G4double meanCos2EncounterRaw = (totalEncounter > 0)
+                                            ? sumCos2ThetaEncounter / static_cast<G4double>(totalEncounter)
+                                            : 0.0;
   const G4double g2Encounter = 0.5 * (3.0 * meanCos2Encounter - 1.0);
+  const G4double g2EncounterRaw = 0.5 * (3.0 * meanCos2EncounterRaw - 1.0);
   const G4double muSPrimeDirectEncounter = (totalMediumPathLengthUm > 0.0)
-                                               ? sumOneMinusCosThetaEncounter / totalMediumPathLengthUm
+                                               ? primarySumOneMinusCosThetaEncounter / totalMediumPathLengthUm
                                                : 0.0;
+  const G4double muSPrimeDirectEncounterRaw = (totalMediumPathLengthUm > 0.0)
+                                                  ? sumOneMinusCosThetaEncounter / totalMediumPathLengthUm
+                                                  : 0.0;
   const G4double muSPrimeEncounterFromG = muSEncounter * (1.0 - g1Encounter);
 
   const G4double muSParticle = (totalPathLengthUm > 0.0)
@@ -740,6 +861,9 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << "num_encounter_total,"
       << "num_encounter_BN,"
       << "num_encounter_ZnS,"
+      << "num_encounter_effective_total,"
+      << "num_encounter_effective_BN,"
+      << "num_encounter_effective_ZnS,"
       << "mu_a_count_per_um,"
       << "mu_a_expected_per_um,"
       << "mu_a_BN_count_per_um,"
@@ -832,7 +956,7 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << CsvQuote(fRatioTag) << ","
       << CsvQuote(fPlacementFile) << ","
       << "GO_RVE,"
-      << "particle_encounter_no_threshold,"
+      << CsvQuote(PrimaryScatterMetricLabel(fConfig)) << ","
       << CsvQuote(fConfig ? fConfig->stageD_source_mode : "") << ","
       << CsvQuote(fConfig ? fConfig->stageD_boundary_mode : "") << ","
       << CsvQuote(fConfig ? fConfig->stageD_reentry_mode : "") << ","
@@ -864,6 +988,9 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << totalEncounter << ","
       << totalEncounterBN << ","
       << totalEncounterZnS << ","
+      << totalEncounterEffective << ","
+      << totalEncounterEffectiveBN << ","
+      << totalEncounterEffectiveZnS << ","
       << muACount << ","
       << muAExpected << ","
       << muABNCount << ","
@@ -913,27 +1040,27 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << fReentryPortalSummary.portal_count_by_bin[2] << ","
       << fReentryPortalSummary.portal_count_by_bin[3] << ","
       << muACount << ","
-      << muSEncounter << ","
+      << muSEncounterRaw << ","
       << muSParticle << ","
       << muSBoundaryPrimary << ","
-      << muSEncounterBN << ","
-      << muSEncounterZnS << ","
+      << muSEncounterRawBN << ","
+      << muSEncounterRawZnS << ","
       << muSStepTotal << ","
       << muSBulk << ","
       << muSBoundary << ","
-      << g1Encounter << ","
+      << g1EncounterRaw << ","
       << gParticle << ","
       << gBoundaryPrimary << ","
-      << g1EncounterBN << ","
-      << g1EncounterZnS << ","
+      << g1EncounterRawBN << ","
+      << g1EncounterRawZnS << ","
       << gStepRaw << ","
       << gBulk << ","
       << gBoundary << ","
-      << muSPrimeDirectEncounter << ","
+      << muSPrimeDirectEncounterRaw << ","
       << muSPrimeParticle << ","
       << muSPrimeBoundaryPrimary << ","
-      << (muSEncounterBN * (1.0 - g1EncounterBN)) << ","
-      << (muSEncounterZnS * (1.0 - g1EncounterZnS)) << ","
+      << (muSEncounterRawBN * (1.0 - g1EncounterRawBN)) << ","
+      << (muSEncounterRawZnS * (1.0 - g1EncounterRawZnS)) << ","
       << muSPrimeStepTotal << ","
       << muSPrimeBulk << ","
       << muSPrimeBoundary << ","

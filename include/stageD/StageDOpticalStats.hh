@@ -96,15 +96,27 @@ struct StageDPhotonEventRecord
   G4int num_encounter_total = 0;
   G4int num_encounter_BN = 0;
   G4int num_encounter_ZnS = 0;
+  G4int num_encounter_effective_total = 0;
+  G4int num_encounter_effective_BN = 0;
+  G4int num_encounter_effective_ZnS = 0;
   G4double sum_cos_theta_encounter = 0.0;
   G4double sum_cos_theta_encounter_BN = 0.0;
   G4double sum_cos_theta_encounter_ZnS = 0.0;
+  G4double sum_cos_theta_encounter_effective = 0.0;
+  G4double sum_cos_theta_encounter_effective_BN = 0.0;
+  G4double sum_cos_theta_encounter_effective_ZnS = 0.0;
   G4double sum_one_minus_cos_theta_encounter = 0.0;
   G4double sum_one_minus_cos_theta_encounter_BN = 0.0;
   G4double sum_one_minus_cos_theta_encounter_ZnS = 0.0;
+  G4double sum_one_minus_cos_theta_encounter_effective = 0.0;
+  G4double sum_one_minus_cos_theta_encounter_effective_BN = 0.0;
+  G4double sum_one_minus_cos_theta_encounter_effective_ZnS = 0.0;
   G4double sum_cos2_theta_encounter = 0.0;
   G4double sum_cos2_theta_encounter_BN = 0.0;
   G4double sum_cos2_theta_encounter_ZnS = 0.0;
+  G4double sum_cos2_theta_encounter_effective = 0.0;
+  G4double sum_cos2_theta_encounter_effective_BN = 0.0;
+  G4double sum_cos2_theta_encounter_effective_ZnS = 0.0;
 
   G4int num_particle_scatter = 0;
   G4int num_particle_scatter_BN = 0;
@@ -140,6 +152,9 @@ struct StageDPhotonEventRecord
   G4double g1_encounter_for_this_photon = 0.0;
   G4double g2_encounter_for_this_photon = 0.0;
   G4double mu_s_prime_direct_encounter_per_um_for_this_photon = 0.0;
+  G4double g1_encounter_raw_for_this_photon = 0.0;
+  G4double g2_encounter_raw_for_this_photon = 0.0;
+  G4double mu_s_prime_direct_encounter_raw_per_um_for_this_photon = 0.0;
   G4double mean_cos_theta_particle_for_this_photon = 0.0;
   G4double mean_cos_theta_for_this_photon = 0.0;
   G4double mean_cos_theta_bulk_for_this_photon = 0.0;

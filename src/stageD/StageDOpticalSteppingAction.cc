@@ -46,6 +46,12 @@ namespace
     return std::clamp(a.dot(b), -1.0, 1.0);
   }
 
+  G4bool UsesAngleThresholdEncounterMetric(const AnalysisConfig *config)
+  {
+    return config != nullptr &&
+           config->stageD_scatter_metric == "particle_encounter_angle_threshold";
+  }
+
   std::string ProcessName(const G4StepPoint *point)
   {
     if (point == nullptr)
@@ -400,8 +406,13 @@ G4bool StageDOpticalSteppingAction::HandleLimitKills(const G4Step *step, G4Track
     return false;
 
   auto &event = fEventAction->MutableCurrentEvent();
+  const G4int primaryEncounterCount =
+      UsesAngleThresholdEncounterMetric(fConfig)
+          ? event.num_encounter_effective_total
+          : event.num_encounter_total;
 
-  if (event.num_encounter_total >= fConfig->stageD_target_primary_scatter)
+  if (fConfig->stageD_target_primary_scatter > 0 &&
+      primaryEncounterCount >= fConfig->stageD_target_primary_scatter)
   {
     fEventAction->SetFinalStatus("target_primary_scatter", false);
     track->SetTrackStatus(fStopAndKill);
@@ -518,12 +529,29 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
         postDir);
     const G4double oneMinusCosTheta = 1.0 - cosTheta;
     const G4double cos2Theta = cosTheta * cosTheta;
+    const G4double thetaDeg = std::acos(cosTheta) / deg;
+    const G4bool useThresholdedEncounterMetric =
+        UsesAngleThresholdEncounterMetric(fConfig);
+    const G4bool passesEncounterThreshold =
+        (fConfig != nullptr)
+            ? (thetaDeg >= fConfig->stageD_theta_threshold_deg)
+            : true;
 
     ++event.num_encounter_total;
     event.sum_cos_theta_encounter += cosTheta;
     event.sum_one_minus_cos_theta_encounter += oneMinusCosTheta;
     event.sum_cos2_theta_encounter += cos2Theta;
-    ++event.phase_function_histogram[PhaseFunctionBin(cosTheta)];
+    if (passesEncounterThreshold)
+    {
+      ++event.num_encounter_effective_total;
+      event.sum_cos_theta_encounter_effective += cosTheta;
+      event.sum_one_minus_cos_theta_encounter_effective += oneMinusCosTheta;
+      event.sum_cos2_theta_encounter_effective += cos2Theta;
+    }
+    if (!useThresholdedEncounterMetric || passesEncounterThreshold)
+    {
+      ++event.phase_function_histogram[PhaseFunctionBin(cosTheta)];
+    }
 
     ++event.num_particle_scatter;
     event.sum_cos_theta_particle += cosTheta;
@@ -534,6 +562,13 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
       event.sum_cos_theta_encounter_BN += cosTheta;
       event.sum_one_minus_cos_theta_encounter_BN += oneMinusCosTheta;
       event.sum_cos2_theta_encounter_BN += cos2Theta;
+      if (passesEncounterThreshold)
+      {
+        ++event.num_encounter_effective_BN;
+        event.sum_cos_theta_encounter_effective_BN += cosTheta;
+        event.sum_one_minus_cos_theta_encounter_effective_BN += oneMinusCosTheta;
+        event.sum_cos2_theta_encounter_effective_BN += cos2Theta;
+      }
 
       ++event.num_particle_scatter_BN;
       event.sum_cos_theta_particle_BN += cosTheta;
@@ -544,6 +579,13 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
       event.sum_cos_theta_encounter_ZnS += cosTheta;
       event.sum_one_minus_cos_theta_encounter_ZnS += oneMinusCosTheta;
       event.sum_cos2_theta_encounter_ZnS += cos2Theta;
+      if (passesEncounterThreshold)
+      {
+        ++event.num_encounter_effective_ZnS;
+        event.sum_cos_theta_encounter_effective_ZnS += cosTheta;
+        event.sum_one_minus_cos_theta_encounter_effective_ZnS += oneMinusCosTheta;
+        event.sum_cos2_theta_encounter_effective_ZnS += cos2Theta;
+      }
 
       ++event.num_particle_scatter_ZnS;
       event.sum_cos_theta_particle_ZnS += cosTheta;

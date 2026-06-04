@@ -31,7 +31,7 @@ StageD 的目标不是宏观厚度出光模拟，而是对单个随机 RVE 做�
 当前实现：
 
 - `runMode = StageD_OpticalHomogenization`
-- `source_mode = uniform_ZnS`
+- `source_mode = uniform_all_phase`
 - `boundary_mode = same_phase_reentry`
 - `reentry_mode = state_matched`
 - `particle_reentry_mode = sphere_q_mu`
@@ -41,7 +41,6 @@ StageD 的目标不是宏观厚度出光模拟，而是对单个随机 RVE 做�
 
 当前没有实现：
 
-- `uniform_all_phase`
 - `from_zns_step_sources`
 - `distance_matched_matrix`
 - strict periodic boundary
@@ -143,12 +142,13 @@ cat >/tmp/stageD_run.mac <<'EOF'
 /cfg/setPlacementFile ../Input/placements/1-2/placement_f_0.64_0004.csv
 
 /cfg/stageD/setWavelengthNm 450
-/cfg/stageD/setSourceMode uniform_ZnS
+/cfg/stageD/setSourceMode uniform_all_phase
 /cfg/stageD/setBoundaryMode same_phase_reentry
 /cfg/stageD/setReentryMode state_matched
 /cfg/stageD/setParticleReentryMode sphere_q_mu
 /cfg/stageD/setMatrixReentryMode clearance_binned_portal
-/cfg/stageD/setThetaThresholdDeg 1.0
+/cfg/stageD/setTargetPrimaryScatter 0
+/cfg/stageD/setThetaThresholdDeg 0.5
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000
 /cfg/stageD/setMaxPathLengthUm 1000000

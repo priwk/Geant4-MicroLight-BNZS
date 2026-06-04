@@ -66,7 +66,7 @@ def parse_args():
     stage_d.add_argument("--optical-params", default=None)
     stage_d.add_argument(
         "--source-mode",
-        default="uniform_ZnS",
+        default="uniform_all_phase",
         choices=["uniform_ZnS", "uniform_all_phase", "from_zns_step_sources"],
     )
     stage_d.add_argument(
@@ -96,16 +96,18 @@ def parse_args():
     )
     stage_d.add_argument(
         "--scatter-metric",
-        default="particle_encounter_no_threshold",
+        default="angle_threshold",
         choices=[
+            "angle_threshold",
+            "particle_encounter_angle_threshold",
             "particle_encounter_no_threshold",
             "boundary_deflection",
             "particle_exit_deflection",
             "step_angle_threshold",
         ],
     )
-    stage_d.add_argument("--target-primary-scatter", type=int, default=160)
-    stage_d.add_argument("--theta-threshold-deg", type=float, default=0.10)
+    stage_d.add_argument("--target-primary-scatter", type=int, default=0)
+    stage_d.add_argument("--theta-threshold-deg", type=float, default=0.5)
     stage_d.add_argument("--max-reentry", type=int, default=10000)
     stage_d.add_argument("--max-steps", type=int, default=100000)
     stage_d.add_argument("--max-path-length-um", type=float, default=5000.0)
@@ -211,8 +213,8 @@ def validate_stage_d_args(args):
         raise SystemExit("--wavelength-nm must be > 0")
     if args.theta_threshold_deg < 0.0:
         raise SystemExit("--theta-threshold-deg must be >= 0")
-    if args.target_primary_scatter <= 0:
-        raise SystemExit("--target-primary-scatter must be > 0")
+    if args.target_primary_scatter < 0:
+        raise SystemExit("--target-primary-scatter must be >= 0")
     if args.max_reentry <= 0 or args.max_steps <= 0 or args.max_path_length_um <= 0.0:
         raise SystemExit("--max-reentry, --max-steps, and --max-path-length-um must be > 0")
 

@@ -204,7 +204,8 @@ def write_scalar_summary(out_path: Path, args, wavelengths, photons,
                 mean(reentry),
                 (
                     "Ensemble average over StageD placements; one Geant4 run equals one placement. "
-                    "Primary mu_s/g/g2/mu_s_prime columns report particle encounter without threshold. "
+                    "Primary mu_s/g/g2/mu_s_prime columns follow the StageD primary scatter metric; "
+                    "raw columns remain particle encounter without threshold for comparison. "
                     "Use phase_function_mean_by_ratio.csv for tabulated scattering instead of HG when possible."
                 ),
             ]
@@ -305,7 +306,8 @@ def write_mc_input_json(out_path: Path, ratio: str, wavelength_nm: float,
             "g1": g_mean,
         },
         "notes": [
-            "Primary statistics are derived from particle encounter without threshold.",
+            "Primary statistics follow the StageD primary scatter metric.",
+            "Raw encounter columns remain available without threshold for comparison.",
             "mu_a_per_um is the expected absorption estimate from phase path lengths and ABSLENGTH.",
             "Prefer the tabulated phase function over HG when the downstream Monte Carlo supports it.",
         ],

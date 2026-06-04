@@ -88,7 +88,7 @@ def parse_args():
     )
     parser.add_argument(
         "--source-mode",
-        default="uniform_ZnS",
+        default="uniform_all_phase",
         choices=["uniform_ZnS", "uniform_all_phase", "from_zns_step_sources"],
         help="StageD source mode.",
     )
@@ -118,25 +118,27 @@ def parse_args():
     )
     parser.add_argument(
         "--scatter-metric",
-        default="particle_encounter_no_threshold",
+        default="angle_threshold",
         choices=[
+            "angle_threshold",
+            "particle_encounter_angle_threshold",
             "particle_encounter_no_threshold",
             "boundary_deflection",
             "particle_exit_deflection",
             "step_angle_threshold",
         ],
-        help="StageD scatter metric label. Primary outputs use particle encounter without threshold.",
+        help="StageD primary scatter metric. Use angle_threshold with theta-threshold-deg for physical primary mu_s/g/mu_s_prime.",
     )
     parser.add_argument(
         "--target-primary-scatter",
         type=int,
-        default=160,
-        help="Stop a photon once it accumulates this many primary scatter events.",
+        default=0,
+        help="Stop a photon once it accumulates this many primary scatter events. Use 0 to disable.",
     )
     parser.add_argument(
         "--theta-threshold-deg",
         type=float,
-        default=0.10,
+        default=0.5,
         help="StageD effective scatter angle threshold.",
     )
     parser.add_argument(
@@ -299,8 +301,8 @@ def main():
         raise SystemExit("--wavelength-nm must be > 0")
     if args.theta_threshold_deg < 0.0:
         raise SystemExit("--theta-threshold-deg must be >= 0")
-    if args.target_primary_scatter <= 0:
-        raise SystemExit("--target-primary-scatter must be > 0")
+    if args.target_primary_scatter < 0:
+        raise SystemExit("--target-primary-scatter must be >= 0")
     if args.max_reentry <= 0 or args.max_steps <= 0 or args.max_path_length_um <= 0.0:
         raise SystemExit("--max-reentry, --max-steps, and --max-path-length-um must be > 0")
 

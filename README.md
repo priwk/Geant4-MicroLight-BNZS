@@ -57,7 +57,7 @@ Stage C 包含 `StageC_OpticalRVE`，用于基于派生的 ZnS step 源表进行
 
 StageD 使用多套随机 RVE 的同相统计重入来近似无限随机浑浊介质。
 它不追求同一个 RVE 的几何周期连续性。
-当前主输出口径是 `particle encounter without threshold`：
+当前主输出口径默认是 `particle encounter angle threshold`：
 每次光子进入 BN/ZnS 颗粒时记录入射方向，最终离开该颗粒时记录出射方向，
 并据此统计 `mu_a`、`mu_s`、`g1`、`g2`、`mu_s_prime` 和 `P(cos theta)`。
 宏观厚度、读出光子、PSF/MTF 由独立 Macro OpticalMC 处理。
@@ -66,7 +66,7 @@ StageD 使用多套随机 RVE 的同相统计重入来近似无限随机浑浊�
 
 ```text
 - RunMode: StageD_OpticalHomogenization
-- source_mode: uniform_ZnS
+- source_mode: uniform_all_phase
 - boundary_mode: same_phase_reentry
 - sphere re-entry: same_phase_rho_over_R / same_phase_random
 - matrix re-entry: random_matrix
@@ -81,9 +81,10 @@ StageD 使用多套随机 RVE 的同相统计重入来近似无限随机浑浊�
 ```text
 /cfg/setRunMode StageD_OpticalHomogenization
 /cfg/stageD/setWavelengthNm 450
-/cfg/stageD/setSourceMode uniform_ZnS
+/cfg/stageD/setSourceMode uniform_all_phase
 /cfg/stageD/setBoundaryMode same_phase_reentry
-/cfg/stageD/setThetaThresholdDeg 1.0
+/cfg/stageD/setTargetPrimaryScatter 0
+/cfg/stageD/setThetaThresholdDeg 0.5
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000
 /cfg/stageD/setMaxPathLengthUm 1000000
