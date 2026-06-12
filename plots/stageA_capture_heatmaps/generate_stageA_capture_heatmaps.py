@@ -5,22 +5,47 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 
-import matplotlib
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-matplotlib.use("Agg")
+DEPENDENCY_ERROR = """
+Failed to import the plotting dependencies.
 
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib import font_manager
-from matplotlib.colors import LinearSegmentedColormap, PowerNorm
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
+This usually means NumPy and Matplotlib were installed from incompatible
+environments. For example, an old system Matplotlib compiled against NumPy 1.x
+cannot run with NumPy 2.x.
+
+Use a clean virtual environment from the project root:
+
+    python3 -m venv .venv
+    . .venv/bin/activate
+    python3 -m pip install -r plots/stageA_capture_heatmaps/requirements.txt
+    python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py
+""".strip()
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib import font_manager
+    from matplotlib.colors import LinearSegmentedColormap, PowerNorm
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+except ImportError as exc:
+    raise SystemExit(f"{DEPENDENCY_ERROR}\n\nOriginal error: {exc}") from None
+except AttributeError as exc:
+    if "_ARRAY_API" in str(exc):
+        raise SystemExit(f"{DEPENDENCY_ERROR}\n\nOriginal error: {exc}") from None
+    raise
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 FONT_DIR = SCRIPT_DIR / "fonts"

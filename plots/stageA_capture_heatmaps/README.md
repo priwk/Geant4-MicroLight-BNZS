@@ -1,39 +1,60 @@
-# Stage A capture heatmaps
+# Stage A absorption figures
 
-This folder contains a small standalone plotting workflow for Stage A neutron
-capture results.
+This folder contains a standalone plotting workflow for Stage A neutron
+absorption results.
 
-Files:
+The script reads simulation data from:
 
-- `generate_stageA_capture_heatmaps.py`
-  reads `Input/stageA/*/neutron_capture_positions/*.csv` and writes two heatmaps
-  plus the flattened CSV tables used to build them.
-- `output/`
-  stores the generated PNG and CSV files.
+- `Input/stageA/*/neutron_capture_absorption/*.csv`
+- `Input/stageA/*/neutron_capture_positions/*.csv`
 
-Generated figures:
+Optional experimental absorption points are read from the local spreadsheet:
 
-1. `p_cap_vs_thickness_heatmap.png`
-   uses the `neutron_capture_positions` CSVs directly. The script infers the
-   sample incident count from the largest `eventID` seen for each ratio. In the
-   current dataset that evaluates to `500000`, so
-   `P_cap = n_capture_positions / 500000`.
-2. `geant4_vs_exponential_model_delta_heatmap.png`
-   compares the sampled Geant4 result against
-   `P_cap = 1 - exp(-Sigma_eff t)`, where `Sigma_eff` is taken from
-   `geant4_macroscopic_cross_sections/geant4_macroscopic_cross_sections.csv`
-   at `thickness_um = 1000` and `energy_eV = 0.0253`, using the
-   `total_removal_macroscopic_xs_per_cm` column.
+- `plots/stageA_capture_heatmaps/input/neutron_absorption.xlsx`
 
-Notes:
+The `input/` and `output/` directories are intentionally not tracked by Git.
 
-- The comparison heatmap keeps the full ratio axis, but ratios without a
-  matching `geant4_macroscopic_cross_sections.csv` are shown as blank cells.
-- The current repository only contains that macroscopic-cross-section input for
-  `Input/stageA/1-2/`, so only the `1-2` row is populated in the second figure.
+## Run from the project root
 
-Run:
+Run the script from the same repository that contains `plots/` and `Input/`:
 
 ```bash
 python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py
 ```
+
+If you activate a virtual environment, still run the command from the project
+root. For example, if the repository is `~/g4work/M1`, do not run the command
+from `~/g4work/MC`.
+
+## Recommended isolated environment
+
+On shared servers, system Python packages often mix incompatible NumPy and
+Matplotlib builds. Use a project-local virtual environment:
+
+```bash
+cd ~/g4work/M1
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r plots/stageA_capture_heatmaps/requirements.txt
+python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py
+```
+
+The requirements intentionally pin `numpy<2` because older system Matplotlib
+builds are commonly compiled against NumPy 1.x. Installing both packages inside
+the same virtual environment avoids the `_ARRAY_API` and
+`numpy.core.multiarray failed to import` errors.
+
+## Generated figures
+
+The script writes figures and derived CSV tables to:
+
+- `plots/stageA_capture_heatmaps/output/`
+
+Current main figures:
+
+- `neutron_absorption_rate_vs_thickness.png`
+- `neutron_absorption_rate_heatmap.png`
+- `mean_absorption_depth_vs_thickness.png`
+- `normalized_capture_depth_distribution_panels.png`
+- `absolute_capture_depth_distribution_panels.png`
