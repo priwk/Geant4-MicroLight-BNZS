@@ -143,29 +143,6 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
             writer.writerow(row)
 
 
-def read_optional_overlay_points(path: Path) -> dict[str, list[tuple[float, float]]]:
-    if not path.is_file():
-        return {}
-
-    overlay: dict[str, list[tuple[float, float]]] = {}
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        required = {"ratio_tag", "thickness_um", "absorption_rate"}
-        if not required.issubset(set(reader.fieldnames or [])):
-            raise ValueError(
-                f"Overlay CSV must contain columns: {', '.join(sorted(required))}"
-            )
-        for row in reader:
-            ratio_tag = str(row["ratio_tag"]).strip()
-            thickness_um = float(row["thickness_um"])
-            absorption_rate = float(row["absorption_rate"])
-            overlay.setdefault(ratio_tag, []).append((thickness_um, absorption_rate))
-
-    for ratio_tag in overlay:
-        overlay[ratio_tag].sort(key=lambda item: item[0])
-    return overlay
-
-
 def read_overlay_points_from_xlsx(path: Path) -> dict[str, list[tuple[float, float]]]:
     if not path.is_file():
         return {}
@@ -1013,15 +990,12 @@ def main() -> int:
     stagea_root = project_root / "Input" / "stageA"
     output_dir = Path(__file__).resolve().parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    overlay_csv = Path(__file__).resolve().parent / "absorption_rate_overlay_points.csv"
     overlay_xlsx = Path(__file__).resolve().parent / "input" / "neutron_absorption.xlsx"
 
     ratios, thicknesses, absorption_matrix, mean_depth_matrix, absorption_records, mean_depth_records = (
         collect_absorption_and_depth(stagea_root)
     )
     overlay_points = read_overlay_points_from_xlsx(overlay_xlsx)
-    if not overlay_points:
-        overlay_points = read_optional_overlay_points(overlay_csv)
 
     absorption_csv = output_dir / "neutron_absorption_rate_by_ratio_and_thickness.csv"
     write_csv(
