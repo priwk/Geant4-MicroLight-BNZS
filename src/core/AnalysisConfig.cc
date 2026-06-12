@@ -240,7 +240,7 @@ AnalysisConfig::AnalysisConfig()
       opticalBnRIndex(1.98),
       opticalBnAbsLengthUm(1.0e4),
       opticalZnsRIndex(2.45),
-      opticalZnsAbsLengthUm(8.0e2),
+      opticalZnsAbsLengthUm(1.0e3),
       stageD_wavelength_nm(450.0),
       stageD_source_mode("uniform_all_phase"),
       stageD_boundary_mode("same_phase_reentry"),
