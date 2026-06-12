@@ -196,6 +196,20 @@ def read_overlay_points_from_xlsx(path: Path) -> dict[str, list[tuple[float, flo
             idx = idx * 26 + (ord(ch.upper()) - 64)
         return idx - 1
 
+    def cell_text(cell: ET.Element, shared: list[str]) -> str:
+        cell_type = cell.attrib.get("t")
+        if cell_type == "inlineStr":
+            texts = [t.text or "" for t in cell.iterfind(".//a:t", ns)]
+            return "".join(texts)
+
+        value_node = cell.find("a:v", ns)
+        if value_node is None or value_node.text is None:
+            return ""
+
+        if cell_type == "s":
+            return shared[int(value_node.text)]
+        return value_node.text
+
     overlay: dict[str, list[tuple[float, float]]] = {}
     with ZipFile(path) as zf:
         shared: list[str] = []
@@ -227,15 +241,7 @@ def read_overlay_points_from_xlsx(path: Path) -> dict[str, list[tuple[float, flo
                 ref = cell.attrib.get("r", "A1")
                 idx = col_to_idx(ref)
                 max_idx = max(max_idx, idx)
-                cell_type = cell.attrib.get("t")
-                value = ""
-                value_node = cell.find("a:v", ns)
-                if value_node is not None and value_node.text is not None:
-                    if cell_type == "s":
-                        value = shared[int(value_node.text)]
-                    else:
-                        value = value_node.text
-                cells.append((idx, value))
+                cells.append((idx, cell_text(cell, shared)))
             if cells:
                 arr = [""] * (max_idx + 1)
                 for idx, value in cells:
