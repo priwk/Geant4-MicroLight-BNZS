@@ -23,10 +23,16 @@ cannot run with NumPy 2.x.
 
 Use a clean virtual environment from the project root:
 
+    cd ~/g4work/M1
     python3 -m venv .venv
     . .venv/bin/activate
+    python3 -m pip install --upgrade pip
     python3 -m pip install -r plots/stageA_capture_heatmaps/requirements.txt
     python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py
+
+The command must be run from the repository that contains both Input/ and
+plots/. If the shell prompt shows another directory, such as ~/g4work/MC, switch
+back to the M1 project root first.
 """.strip()
 
 try:

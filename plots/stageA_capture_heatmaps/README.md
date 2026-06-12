@@ -14,22 +14,13 @@ Optional experimental absorption points are read from the local spreadsheet:
 
 The `input/` and `output/` directories are intentionally not tracked by Git.
 
-## Run from the project root
-
-Run the script from the same repository that contains `plots/` and `Input/`:
-
-```bash
-python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py
-```
-
-If you activate a virtual environment, still run the command from the project
-root. For example, if the repository is `~/g4work/M1`, do not run the command
-from `~/g4work/MC`.
-
-## Recommended isolated environment
+## Run on a shared server
 
 On shared servers, system Python packages often mix incompatible NumPy and
-Matplotlib builds. Use a project-local virtual environment:
+Matplotlib builds. If system Python raises `_ARRAY_API` or
+`numpy.core.multiarray failed to import`, do not keep using that environment.
+Create a project-local virtual environment in the same repository that contains
+both `Input/` and `plots/`:
 
 ```bash
 cd ~/g4work/M1
@@ -44,6 +35,10 @@ The requirements intentionally pin `numpy<2` because older system Matplotlib
 builds are commonly compiled against NumPy 1.x. Installing both packages inside
 the same virtual environment avoids the `_ARRAY_API` and
 `numpy.core.multiarray failed to import` errors.
+
+The working directory matters. If the prompt is `~/g4work/MC`, then
+`python3 plots/stageA_capture_heatmaps/generate_stageA_capture_heatmaps.py`
+looks for the script under `MC/plots/...`, not `M1/plots/...`.
 
 ## Generated figures
 
