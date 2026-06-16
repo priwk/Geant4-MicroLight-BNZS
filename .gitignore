@@ -9,3 +9,5 @@ scripts/__pycache__/
 plots/stageA_capture_heatmaps/__pycache__/
 plots/stageA_capture_heatmaps/output/
 plots/stageB_scintillation_strength/output/
+plots/stageC_placement_distribution/output/
+plots/stageD_zns_trajectories/output/
