@@ -47,6 +47,7 @@ The script writes figures and a derived summary table to:
 Main outputs:
 
 - `stageD_zns_trajectory_showcase_3d.png`
+- `stageD_macro_trajectory_showcase_3d.png`
 - `stageD_zns_trajectory_projection_panels.png`
 - `stageD_zns_trajectory_statistics_vs_thickness.png`
 - `stageD_1000um_mean_total_track_length_by_ratio.png`
@@ -70,6 +71,18 @@ python3 plots/stageD_zns_trajectories/generate_stageD_zns_trajectories.py \
   --showcase-thickness 1000 \
   --sample-trajectories 120 \
   --max-showcase-steps 800000
+```
+
+`stageD_zns_trajectory_showcase_3d.png` uses local RVE coordinates. If the
+selected input contains `capture_x_um`, `capture_y_um`, `depth_um`, and
+`local_capture_*` columns, the script also writes
+`stageD_macro_trajectory_showcase_3d.png`. That figure maps each local step back
+to the macroscopic capture location using:
+
+```text
+macro_x = capture_x_um + (local_x - local_capture_x_um)
+macro_y = capture_y_um + (local_y - local_capture_y_um)
+macro_z = depth_um     + (local_z - local_capture_z_um)
 ```
 
 For the cloud server case where all six ratios have `1000_alpha_li_steps.csv`,

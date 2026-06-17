@@ -102,6 +102,8 @@ class TrackStep:
     phase_post: str
     start: tuple[float, float, float]
     end: tuple[float, float, float]
+    macro_start: tuple[float, float, float] | None
+    macro_end: tuple[float, float, float] | None
     step_len_um: float
     edep_kev: float
     ekin_pre_kev: float
@@ -321,6 +323,49 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
             writer.writerow({key: fmt(row.get(key, "")) for key in fieldnames})
 
 
+def has_macro_anchor(row: dict[str, str]) -> bool:
+    required = {
+        "capture_x_um",
+        "capture_y_um",
+        "depth_um",
+        "local_capture_x_um",
+        "local_capture_y_um",
+        "local_capture_z_um",
+    }
+    return required.issubset(row.keys())
+
+
+def macro_points_from_row(
+    row: dict[str, str],
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+) -> tuple[tuple[float, float, float] | None, tuple[float, float, float] | None]:
+    if not has_macro_anchor(row):
+        return None, None
+
+    capture = (
+        safe_float(row.get("capture_x_um"), default=math.nan),
+        safe_float(row.get("capture_y_um"), default=math.nan),
+        safe_float(row.get("depth_um"), default=math.nan),
+    )
+    local_capture = (
+        safe_float(row.get("local_capture_x_um"), default=math.nan),
+        safe_float(row.get("local_capture_y_um"), default=math.nan),
+        safe_float(row.get("local_capture_z_um"), default=math.nan),
+    )
+    if not all(math.isfinite(value) for value in capture + local_capture):
+        return None, None
+
+    def to_macro(point: tuple[float, float, float]) -> tuple[float, float, float]:
+        return (
+            capture[0] + point[0] - local_capture[0],
+            capture[1] + point[1] - local_capture[1],
+            capture[2] + point[2] - local_capture[2],
+        )
+
+    return to_macro(start), to_macro(end)
+
+
 def discover_track_files(
     stageb_root: Path,
     requested_ratios: list[str] | None,
@@ -392,6 +437,17 @@ def discover_track_files(
 
 
 def read_step(row: dict[str, str], ratio: RatioKey, thickness_um: float) -> TrackStep:
+    start = (
+        safe_float(row.get("x_pre_um")),
+        safe_float(row.get("y_pre_um")),
+        safe_float(row.get("z_pre_um")),
+    )
+    end = (
+        safe_float(row.get("x_post_um")),
+        safe_float(row.get("y_post_um")),
+        safe_float(row.get("z_post_um")),
+    )
+    macro_start, macro_end = macro_points_from_row(row, start, end)
     return TrackStep(
         particle=row["particle"].strip(),
         source_event_uid=row["source_event_uid"].strip(),
@@ -399,16 +455,10 @@ def read_step(row: dict[str, str], ratio: RatioKey, thickness_um: float) -> Trac
         thickness_um=thickness_um,
         phase_pre=row.get("phase_pre", "unknown").strip() or "unknown",
         phase_post=row.get("phase_post", "unknown").strip() or "unknown",
-        start=(
-            safe_float(row.get("x_pre_um")),
-            safe_float(row.get("y_pre_um")),
-            safe_float(row.get("z_pre_um")),
-        ),
-        end=(
-            safe_float(row.get("x_post_um")),
-            safe_float(row.get("y_post_um")),
-            safe_float(row.get("z_post_um")),
-        ),
+        start=start,
+        end=end,
+        macro_start=macro_start,
+        macro_end=macro_end,
         step_len_um=safe_float(row.get("step_len_um")),
         edep_kev=safe_float(row.get("edep_keV")),
         ekin_pre_kev=safe_float(row.get("ekin_pre_keV")),
@@ -785,6 +835,23 @@ def trajectory_bounds(trajectories: list[Trajectory]) -> tuple[np.ndarray, np.nd
     return mins - pad, maxs + pad
 
 
+def macro_trajectory_bounds(trajectories: list[Trajectory]) -> tuple[np.ndarray, np.ndarray] | None:
+    points = []
+    for traj in trajectories:
+        for step in traj.steps:
+            if step.macro_start is None or step.macro_end is None:
+                continue
+            points.append(step.macro_start)
+            points.append(step.macro_end)
+    if not points:
+        return None
+    arr = np.asarray(points, dtype=float)
+    mins = np.min(arr, axis=0)
+    maxs = np.max(arr, axis=0)
+    pad = np.maximum((maxs - mins) * 0.08, np.asarray([50.0, 50.0, 2.0]))
+    return mins - pad, maxs + pad
+
+
 def set_3d_equalish(ax, mins: np.ndarray, maxs: np.ndarray) -> None:
     centers = 0.5 * (mins + maxs)
     ranges = np.maximum(maxs - mins, 1.0)
@@ -869,6 +936,100 @@ def plot_trajectory_showcase_3d(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_macro_trajectory_showcase_3d(
+    trajectories: list[Trajectory],
+    output_path: Path,
+    ratio: RatioKey,
+    thickness_um: float,
+) -> bool:
+    bounds = macro_trajectory_bounds(trajectories)
+    if bounds is None:
+        print("Skipping macro trajectory showcase: selected trajectories do not contain macro anchor columns")
+        return False
+    mins, maxs = bounds
+
+    segments_by_phase: defaultdict[str, list[list[tuple[float, float, float]]]] = defaultdict(list)
+    widths_by_phase: defaultdict[str, list[float]] = defaultdict(list)
+    starts = []
+    for traj in trajectories:
+        if not traj.steps or traj.steps[0].macro_start is None:
+            continue
+        starts.append(traj.steps[0].macro_start)
+        for step in traj.steps:
+            if step.macro_start is None or step.macro_end is None:
+                continue
+            segments_by_phase[step.phase_pre].append([step.macro_start, step.macro_end])
+            widths_by_phase[step.phase_pre].append(PARTICLE_LINEWIDTH.get(traj.particle, 1.0) + 0.6)
+
+    if not any(segments_by_phase.values()):
+        print("Skipping macro trajectory showcase: no macro segments after conversion")
+        return False
+
+    fig = plt.figure(figsize=(10.6, 8.0))
+    ax = fig.add_subplot(111, projection="3d")
+    for phase in PHASE_ORDER:
+        segments = segments_by_phase.get(phase, [])
+        if not segments:
+            continue
+        collection = Line3DCollection(
+            np.asarray(segments, dtype=float),
+            colors=PHASE_COLORS.get(phase, PHASE_COLORS["unknown"]),
+            linewidths=widths_by_phase[phase],
+            alpha=0.58 if phase == "binder_void" else 0.78,
+        )
+        ax.add_collection3d(collection)
+
+    if starts:
+        arr = np.asarray(starts, dtype=float)
+        ax.scatter(arr[:, 0], arr[:, 1], arr[:, 2], c="#111827", s=14, marker="o", label="track start")
+
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+    try:
+        ax.set_box_aspect(
+            (
+                max(float(maxs[0] - mins[0]), 1.0),
+                max(float(maxs[1] - mins[1]), 1.0),
+                max(float(maxs[2] - mins[2]), 1.0),
+            )
+        )
+    except AttributeError:
+        pass
+    ax.invert_zaxis()
+    ax.set_xlabel(f"macro x ({mu_m_text()})")
+    ax.set_ylabel(f"macro y ({mu_m_text()})")
+    ax.set_zlabel(f"capture depth ({mu_m_text()})")
+    ax.set_title(
+        f"Macro-positioned alpha/Li trajectories by capture location\n"
+        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}, n = {len(trajectories)}"
+    )
+    ax.view_init(elev=24, azim=-54)
+    ax.grid(True, alpha=0.16)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    phases_present = {phase for phase, segments in segments_by_phase.items() if segments}
+    handles = [
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=phase)
+        for phase in PHASE_ORDER
+        if phase in phases_present
+    ]
+    handles.extend(
+        [
+            Line2D([0], [0], color="#2d3436", lw=3.2, label="alpha width"),
+            Line2D([0], [0], color="#2d3436", lw=2.0, label="Li7 width"),
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="#111827", markersize=5, label="track start"),
+        ]
+    )
+    ax.legend(handles=handles, frameon=False, loc="upper left", fontsize=8.5)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def plot_trajectory_projections(
@@ -1182,6 +1343,12 @@ def main() -> int:
         showcase_ratio,
         showcase_thickness,
     )
+    wrote_macro_showcase = plot_macro_trajectory_showcase_3d(
+        trajectories,
+        output_dir / "stageD_macro_trajectory_showcase_3d.png",
+        showcase_ratio,
+        showcase_thickness,
+    )
     plot_trajectory_projections(
         trajectories,
         output_dir / "stageD_zns_trajectory_projection_panels.png",
@@ -1201,6 +1368,8 @@ def main() -> int:
 
     print(f"Wrote {summary_csv}")
     print(f"Wrote {output_dir / 'stageD_zns_trajectory_showcase_3d.png'}")
+    if wrote_macro_showcase:
+        print(f"Wrote {output_dir / 'stageD_macro_trajectory_showcase_3d.png'}")
     print(f"Wrote {output_dir / 'stageD_zns_trajectory_projection_panels.png'}")
     print(f"Wrote {output_dir / 'stageD_zns_trajectory_statistics_vs_thickness.png'}")
     print(f"Wrote {output_dir / 'stageD_1000um_mean_total_track_length_by_ratio.png'}")
