@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 namespace
@@ -72,6 +73,12 @@ void StageDOpticalEventAction::BeginOfEventAction(const G4Event *event)
   fCurrentEvent.source_z_um = launch.source_position.z() / um;
   fCurrentEvent.final_status = "in_progress";
   fCurrentEvent.weight = launch.photon_weight;
+
+  if (launch.source_phase == "BN" || launch.source_phase == "ZnS")
+  {
+    fCurrentEvent.source_inside_particle_pending_exit = true;
+    fCurrentEvent.encounter_particle_phase = launch.source_phase;
+  }
 }
 
 void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
@@ -81,10 +88,22 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
   const G4bool useThresholdedEncounterMetric =
       (fConfig != nullptr &&
        fConfig->stageD_scatter_metric == "particle_encounter_angle_threshold");
+  const G4double nan = std::numeric_limits<G4double>::quiet_NaN();
 
   if (fCurrentEvent.final_status == "in_progress" ||
       fCurrentEvent.final_status == "continued_reentry")
     fCurrentEvent.final_status = "lost";
+
+  if ((fCurrentEvent.encounter_active ||
+       fCurrentEvent.source_inside_particle_pending_exit) &&
+      !fCurrentEvent.absorbed)
+  {
+    ++fCurrentEvent.num_censored_particle_encounter;
+    fCurrentEvent.encounter_active = false;
+    fCurrentEvent.encounter_has_matrix_entry = false;
+    fCurrentEvent.source_inside_particle_pending_exit = false;
+    fCurrentEvent.encounter_particle_phase.clear();
+  }
 
   if (fCurrentEvent.num_real_scatter > 0)
   {
@@ -144,8 +163,8 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
   }
   else
   {
-    fCurrentEvent.g1_encounter_raw_for_this_photon = 0.0;
-    fCurrentEvent.g2_encounter_raw_for_this_photon = 0.0;
+    fCurrentEvent.g1_encounter_raw_for_this_photon = nan;
+    fCurrentEvent.g2_encounter_raw_for_this_photon = nan;
   }
 
   if (useThresholdedEncounterMetric &&
@@ -171,8 +190,8 @@ void StageDOpticalEventAction::EndOfEventAction(const G4Event *event)
   }
   else
   {
-    fCurrentEvent.g1_encounter_for_this_photon = 0.0;
-    fCurrentEvent.g2_encounter_for_this_photon = 0.0;
+    fCurrentEvent.g1_encounter_for_this_photon = nan;
+    fCurrentEvent.g2_encounter_for_this_photon = nan;
   }
 
   const G4double mediumPathLengthUm =
@@ -199,6 +218,20 @@ void StageDOpticalEventAction::SetFinalStatus(
     const std::string &status,
     G4bool absorbed)
 {
+  if ((status == "max_reentry" ||
+       status == "max_steps" ||
+       status == "max_path_length" ||
+       status == "reentry_failed") &&
+      (fCurrentEvent.encounter_active ||
+       fCurrentEvent.source_inside_particle_pending_exit))
+  {
+    ++fCurrentEvent.num_censored_particle_encounter;
+    fCurrentEvent.encounter_active = false;
+    fCurrentEvent.encounter_has_matrix_entry = false;
+    fCurrentEvent.source_inside_particle_pending_exit = false;
+    fCurrentEvent.encounter_particle_phase.clear();
+  }
+
   fCurrentEvent.final_status = status;
   fCurrentEvent.absorbed = absorbed;
 }
@@ -216,4 +249,19 @@ void StageDOpticalEventAction::MarkAbsorbed(const std::string &phaseLabel)
     ++fCurrentEvent.num_absorbed_World;
 
   SetFinalStatus("absorbed", true);
+}
+
+void StageDOpticalEventAction::MarkCensoredEncounterIfActive()
+{
+  if (!fCurrentEvent.encounter_active &&
+      !fCurrentEvent.source_inside_particle_pending_exit)
+  {
+    return;
+  }
+
+  ++fCurrentEvent.num_censored_particle_encounter;
+  fCurrentEvent.encounter_active = false;
+  fCurrentEvent.encounter_has_matrix_entry = false;
+  fCurrentEvent.source_inside_particle_pending_exit = false;
+  fCurrentEvent.encounter_particle_phase.clear();
 }

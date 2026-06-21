@@ -83,11 +83,16 @@ G4bool StageDReentrySampler::SampleReentry(const ReentryContext &ctx,
   if (ctx.phase == DetectorConstruction::Phase::BN ||
       ctx.phase == DetectorConstruction::Phase::ZnS)
   {
-    const std::string mode =
-        (fConfig != nullptr) ? fConfig->stageD_particle_reentry_mode : std::string("sphere_q_mu");
-    if (mode == "sphere_q_mu" ||
-        ((fConfig != nullptr) && fConfig->stageD_reentry_mode == "state_matched") ||
-        mode.empty())
+    std::string mode =
+        (fConfig != nullptr) ? fConfig->stageD_particle_reentry_mode : std::string();
+    if (mode.empty())
+    {
+      mode = (fConfig != nullptr && fConfig->stageD_reentry_mode == "state_matched")
+                 ? "sphere_q_mu"
+                 : "same_phase_random";
+    }
+
+    if (mode == "sphere_q_mu")
     {
       return SampleParticleSphereQMuReentry(ctx, newPosition, diag);
     }
