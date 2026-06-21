@@ -127,6 +127,26 @@ struct StageDPhotonEventRecord
   G4int num_boundary_scatter_BN = 0;
   G4int num_boundary_scatter_ZnS = 0;
   G4int num_material_boundary = 0;
+
+  G4int num_complete_encounter_total = 0;
+  G4int num_complete_encounter_BN = 0;
+  G4int num_complete_encounter_ZnS = 0;
+  G4int num_surface_reflection_encounter = 0;
+  G4int num_incomplete_initial_particle_exit = 0;
+  G4int num_censored_particle_encounter = 0;
+  G4int num_inconsistent_encounter_state = 0;
+  G4int num_particle_to_particle_boundary = 0;
+  G4int num_unknown_particle_reflection = 0;
+
+  G4int num_outer_boundary_hits = 0;
+  G4int num_outer_boundary_reentry_success = 0;
+  G4int num_outer_boundary_reentry_failed = 0;
+  G4int num_outer_boundary_fresnel_reflection = 0;
+  G4int num_outer_boundary_total_internal_reflection = 0;
+  G4int num_outer_boundary_refraction = 0;
+  G4int num_outer_boundary_transmission = 0;
+  G4int num_outer_boundary_other_status = 0;
+
   G4int num_reentry = 0;
   G4int num_reentry_BN = 0;
   G4int num_reentry_ZnS = 0;
@@ -163,9 +183,11 @@ struct StageDPhotonEventRecord
 
   std::array<G4int, kPhaseFunctionBins> phase_function_histogram{};
 
-  G4bool in_particle_segment = false;
-  std::string particle_segment_phase;
-  G4ThreeVector particle_segment_entry_direction;
+  G4bool encounter_active = false;
+  G4bool encounter_has_matrix_entry = false;
+  G4bool source_inside_particle_pending_exit = false;
+  std::string encounter_particle_phase;
+  G4ThreeVector encounter_matrix_entry_direction;
 };
 
 #endif

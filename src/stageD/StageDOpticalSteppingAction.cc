@@ -9,8 +9,13 @@
 #include "G4EventManager.hh"
 #include "G4Exception.hh"
 #include "G4DynamicParticle.hh"
+#include "G4GeometryTolerance.hh"
 #include "G4OpticalPhoton.hh"
 #include "G4LogicalVolume.hh"
+#include "G4OpBoundaryProcess.hh"
+#include "G4ParticleDefinition.hh"
+#include "G4ProcessManager.hh"
+#include "G4ProcessVector.hh"
 #include "G4RunManager.hh"
 #include "G4StackManager.hh"
 #include "G4Step.hh"
@@ -23,11 +28,23 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace
 {
   constexpr G4double kBoundaryEpsilon = 1.0e-4 * um;
+
+  enum class RveFace
+  {
+    PosX,
+    NegX,
+    PosY,
+    NegY,
+    PosZ,
+    NegZ,
+    None
+  };
 
   G4bool IsOpticalPhoton(const G4Track *track)
   {
@@ -51,6 +68,8 @@ namespace
     return config != nullptr &&
            config->stageD_scatter_metric == "particle_encounter_angle_threshold";
   }
+
+  G4int PhaseFunctionBin(const G4double cosTheta);
 
   std::string ProcessName(const G4StepPoint *point)
   {
@@ -90,8 +109,10 @@ namespace
     return DetectorConstruction::Phase::Unknown;
   }
 
-  G4bool IsOutsideRve(const G4ThreeVector &position,
-                      const DetectorConstruction *detector)
+  G4bool IsOnRveSurface(const G4ThreeVector &position,
+                        const DetectorConstruction *detector,
+                        G4double tolerance,
+                        RveFace *face)
   {
     if (detector == nullptr)
       return false;
@@ -99,9 +120,119 @@ namespace
     const G4double halfX = detector->GetPatchHalfXUm() * um;
     const G4double halfY = detector->GetPatchHalfYUm() * um;
     const G4double halfZ = detector->GetPatchHalfZUm() * um;
-    return (std::abs(position.x()) > halfX ||
-            std::abs(position.y()) > halfY ||
-            std::abs(position.z()) > halfZ);
+    const G4double tol = std::max(tolerance, 1.0e-9 * um);
+
+    const G4bool withinX = std::abs(position.x()) <= halfX + tol;
+    const G4bool withinY = std::abs(position.y()) <= halfY + tol;
+    const G4bool withinZ = std::abs(position.z()) <= halfZ + tol;
+    if (!withinX || !withinY || !withinZ)
+      return false;
+
+    struct FaceCandidate
+    {
+      RveFace face = RveFace::None;
+      G4double delta = 0.0;
+    };
+
+    FaceCandidate best{RveFace::None, std::numeric_limits<G4double>::infinity()};
+    auto consider = [&](RveFace candidate, G4double delta)
+    {
+      if (delta <= tol && delta < best.delta)
+        best = FaceCandidate{candidate, delta};
+    };
+
+    consider((position.x() >= 0.0) ? RveFace::PosX : RveFace::NegX,
+             std::abs(std::abs(position.x()) - halfX));
+    consider((position.y() >= 0.0) ? RveFace::PosY : RveFace::NegY,
+             std::abs(std::abs(position.y()) - halfY));
+    consider((position.z() >= 0.0) ? RveFace::PosZ : RveFace::NegZ,
+             std::abs(std::abs(position.z()) - halfZ));
+
+    if (best.face == RveFace::None)
+      return false;
+    if (face != nullptr)
+      *face = best.face;
+    return true;
+  }
+
+  G4bool IsInsideRveBoxWithTolerance(const G4ThreeVector &position,
+                                     const DetectorConstruction *detector,
+                                     G4double tolerance)
+  {
+    if (detector == nullptr)
+      return false;
+
+    const G4double halfX = detector->GetPatchHalfXUm() * um;
+    const G4double halfY = detector->GetPatchHalfYUm() * um;
+    const G4double halfZ = detector->GetPatchHalfZUm() * um;
+    const G4double tol = std::max(tolerance, 1.0e-9 * um);
+    return std::abs(position.x()) <= halfX + tol &&
+           std::abs(position.y()) <= halfY + tol &&
+           std::abs(position.z()) <= halfZ + tol;
+  }
+
+  G4ThreeVector RveFaceNormal(RveFace face)
+  {
+    switch (face)
+    {
+    case RveFace::PosX:
+      return G4ThreeVector(1.0, 0.0, 0.0);
+    case RveFace::NegX:
+      return G4ThreeVector(-1.0, 0.0, 0.0);
+    case RveFace::PosY:
+      return G4ThreeVector(0.0, 1.0, 0.0);
+    case RveFace::NegY:
+      return G4ThreeVector(0.0, -1.0, 0.0);
+    case RveFace::PosZ:
+      return G4ThreeVector(0.0, 0.0, 1.0);
+    case RveFace::NegZ:
+      return G4ThreeVector(0.0, 0.0, -1.0);
+    case RveFace::None:
+    default:
+      return G4ThreeVector();
+    }
+  }
+
+  G4bool IsRveOuterBoundaryStep(const G4Step *step,
+                                const DetectorConstruction *detector,
+                                RveFace *face)
+  {
+    if (step == nullptr || detector == nullptr ||
+        step->GetPreStepPoint() == nullptr ||
+        step->GetPostStepPoint() == nullptr)
+      return false;
+
+    const auto *prePoint = step->GetPreStepPoint();
+    const auto *postPoint = step->GetPostStepPoint();
+    if (postPoint->GetStepStatus() != fGeomBoundary)
+      return false;
+
+    const G4double tolerance =
+        G4GeometryTolerance::GetInstance()->GetSurfaceTolerance();
+    if (!IsInsideRveBoxWithTolerance(prePoint->GetPosition(), detector, tolerance))
+      return false;
+
+    RveFace candidateFace = RveFace::None;
+    if (!IsOnRveSurface(postPoint->GetPosition(), detector, tolerance, &candidateFace))
+      return false;
+
+    const G4ThreeVector chord = postPoint->GetPosition() - prePoint->GetPosition();
+    const G4ThreeVector normal = RveFaceNormal(candidateFace);
+    if (chord.mag2() > 0.0 && normal.mag2() > 0.0 &&
+        chord.dot(normal) < -tolerance)
+    {
+      return false;
+    }
+    const G4ThreeVector preDir = prePoint->GetMomentumDirection();
+    if (preDir.mag2() > 0.0 && normal.mag2() > 0.0 &&
+        preDir.unit().dot(normal) < -1.0e-9)
+    {
+      return false;
+    }
+
+    if (face != nullptr)
+      *face = candidateFace;
+    return true;
   }
 
   G4bool IsParticlePhase(DetectorConstruction::Phase phase)
@@ -121,6 +252,122 @@ namespace
     if (phase == DetectorConstruction::Phase::Unknown)
       return "Unknown";
     return DetectorConstruction::PhaseName(phase);
+  }
+
+  DetectorConstruction::Phase PhaseFromLabel(const std::string &label)
+  {
+    if (label == "BN")
+      return DetectorConstruction::Phase::BN;
+    if (label == "ZnS")
+      return DetectorConstruction::Phase::ZnS;
+    if (label == "Matrix")
+      return DetectorConstruction::Phase::Matrix;
+    if (label == "World")
+      return DetectorConstruction::Phase::World;
+    return DetectorConstruction::Phase::Unknown;
+  }
+
+  G4OpBoundaryProcess *FindOpticalBoundaryProcess()
+  {
+    auto *definition = G4OpticalPhoton::OpticalPhotonDefinition();
+    if (definition == nullptr)
+      return nullptr;
+
+    auto *processManager = definition->GetProcessManager();
+    if (processManager == nullptr)
+      return nullptr;
+
+    auto *processList = processManager->GetProcessList();
+    if (processList == nullptr)
+      return nullptr;
+
+    const G4int nProcesses = processManager->GetProcessListLength();
+    for (G4int i = 0; i < nProcesses; ++i)
+    {
+      auto *process = (*processList)[i];
+      auto *boundary = dynamic_cast<G4OpBoundaryProcess *>(process);
+      if (boundary != nullptr)
+        return boundary;
+    }
+    return nullptr;
+  }
+
+  G4OpBoundaryProcessStatus CurrentBoundaryStatus()
+  {
+    auto *boundary = FindOpticalBoundaryProcess();
+    return boundary ? boundary->GetStatus() : Undefined;
+  }
+
+  G4bool IsBoundaryReflection(G4OpBoundaryProcessStatus status)
+  {
+    return status == FresnelReflection ||
+           status == TotalInternalReflection ||
+           status == LambertianReflection ||
+           status == LobeReflection ||
+           status == SpikeReflection ||
+           status == BackScattering ||
+           status == PolishedLumirrorAirReflection ||
+           status == PolishedLumirrorGlueReflection ||
+           status == PolishedAirReflection ||
+           status == PolishedTeflonAirReflection ||
+           status == PolishedTiOAirReflection ||
+           status == PolishedTyvekAirReflection ||
+           status == PolishedVM2000AirReflection ||
+           status == PolishedVM2000GlueReflection ||
+           status == EtchedLumirrorAirReflection ||
+           status == EtchedLumirrorGlueReflection ||
+           status == EtchedAirReflection ||
+           status == EtchedTeflonAirReflection ||
+           status == EtchedTiOAirReflection ||
+           status == EtchedTyvekAirReflection ||
+           status == EtchedVM2000AirReflection ||
+           status == EtchedVM2000GlueReflection ||
+           status == GroundLumirrorAirReflection ||
+           status == GroundLumirrorGlueReflection ||
+           status == GroundAirReflection ||
+           status == GroundTeflonAirReflection ||
+           status == GroundTiOAirReflection ||
+           status == GroundTyvekAirReflection ||
+           status == GroundVM2000AirReflection ||
+           status == GroundVM2000GlueReflection ||
+           status == CoatedDielectricReflection;
+  }
+
+  G4bool IsBoundaryTransmission(G4OpBoundaryProcessStatus status)
+  {
+    return status == Transmission ||
+           status == FresnelRefraction ||
+           status == SameMaterial ||
+           status == StepTooSmall ||
+           status == CoatedDielectricRefraction ||
+           status == CoatedDielectricFrustratedTransmission;
+  }
+
+  G4bool IsPhaseTransmission(DetectorConstruction::Phase prePhase,
+                             DetectorConstruction::Phase postPhase)
+  {
+    return prePhase != postPhase &&
+           prePhase != DetectorConstruction::Phase::Unknown &&
+           postPhase != DetectorConstruction::Phase::Unknown &&
+           prePhase != DetectorConstruction::Phase::World &&
+           postPhase != DetectorConstruction::Phase::World;
+  }
+
+  void AccumulateOuterBoundaryStatus(StageDPhotonEventRecord &event,
+                                     G4OpBoundaryProcessStatus status)
+  {
+    if (status == FresnelReflection)
+      ++event.num_outer_boundary_fresnel_reflection;
+    else if (status == TotalInternalReflection)
+      ++event.num_outer_boundary_total_internal_reflection;
+    else if (status == FresnelRefraction || status == CoatedDielectricRefraction)
+      ++event.num_outer_boundary_refraction;
+    else if (status == Transmission ||
+             status == SameMaterial ||
+             status == CoatedDielectricFrustratedTransmission)
+      ++event.num_outer_boundary_transmission;
+    else
+      ++event.num_outer_boundary_other_status;
   }
 
   G4bool ComputeExitPointOnRveBox(const G4ThreeVector &prePos,
@@ -164,6 +411,91 @@ namespace
 
     exitPoint = prePos + tMax * oldDir;
     return true;
+  }
+
+  DetectorConstruction::Phase ProbeForwardPhase(const G4Step *step,
+                                                const DetectorConstruction *detector,
+                                                const G4ThreeVector &direction)
+  {
+    if (step == nullptr || detector == nullptr || step->GetPostStepPoint() == nullptr ||
+        direction.mag2() <= 0.0)
+    {
+      return DetectorConstruction::Phase::Unknown;
+    }
+
+    const G4double tolerance =
+        G4GeometryTolerance::GetInstance()->GetSurfaceTolerance();
+    const G4double offset = std::max(4.0 * tolerance, 4.0 * kBoundaryEpsilon);
+    return detector->FindPhaseAtPoint(step->GetPostStepPoint()->GetPosition() +
+                                      offset * direction.unit());
+  }
+
+  void RecordCompleteEncounter(StageDPhotonEventRecord &event,
+                               G4double cosTheta,
+                               DetectorConstruction::Phase particlePhase,
+                               const AnalysisConfig *config)
+  {
+    cosTheta = std::clamp(cosTheta, -1.0, 1.0);
+    const G4double oneMinusCosTheta = 1.0 - cosTheta;
+    const G4double cos2Theta = cosTheta * cosTheta;
+    const G4double thetaDeg = std::acos(cosTheta) / deg;
+    const G4bool useThresholdedEncounterMetric =
+        UsesAngleThresholdEncounterMetric(config);
+    const G4bool passesEncounterThreshold =
+        (config != nullptr) ? (thetaDeg >= config->stageD_theta_threshold_deg) : true;
+
+    ++event.num_complete_encounter_total;
+    ++event.num_encounter_total;
+    event.sum_cos_theta_encounter += cosTheta;
+    event.sum_one_minus_cos_theta_encounter += oneMinusCosTheta;
+    event.sum_cos2_theta_encounter += cos2Theta;
+    if (passesEncounterThreshold)
+    {
+      ++event.num_encounter_effective_total;
+      event.sum_cos_theta_encounter_effective += cosTheta;
+      event.sum_one_minus_cos_theta_encounter_effective += oneMinusCosTheta;
+      event.sum_cos2_theta_encounter_effective += cos2Theta;
+    }
+    if (!useThresholdedEncounterMetric || passesEncounterThreshold)
+      ++event.phase_function_histogram[PhaseFunctionBin(cosTheta)];
+
+    ++event.num_particle_scatter;
+    event.sum_cos_theta_particle += cosTheta;
+
+    if (particlePhase == DetectorConstruction::Phase::BN)
+    {
+      ++event.num_complete_encounter_BN;
+      ++event.num_encounter_BN;
+      event.sum_cos_theta_encounter_BN += cosTheta;
+      event.sum_one_minus_cos_theta_encounter_BN += oneMinusCosTheta;
+      event.sum_cos2_theta_encounter_BN += cos2Theta;
+      if (passesEncounterThreshold)
+      {
+        ++event.num_encounter_effective_BN;
+        event.sum_cos_theta_encounter_effective_BN += cosTheta;
+        event.sum_one_minus_cos_theta_encounter_effective_BN += oneMinusCosTheta;
+        event.sum_cos2_theta_encounter_effective_BN += cos2Theta;
+      }
+      ++event.num_particle_scatter_BN;
+      event.sum_cos_theta_particle_BN += cosTheta;
+    }
+    else if (particlePhase == DetectorConstruction::Phase::ZnS)
+    {
+      ++event.num_complete_encounter_ZnS;
+      ++event.num_encounter_ZnS;
+      event.sum_cos_theta_encounter_ZnS += cosTheta;
+      event.sum_one_minus_cos_theta_encounter_ZnS += oneMinusCosTheta;
+      event.sum_cos2_theta_encounter_ZnS += cos2Theta;
+      if (passesEncounterThreshold)
+      {
+        ++event.num_encounter_effective_ZnS;
+        event.sum_cos_theta_encounter_effective_ZnS += cosTheta;
+        event.sum_one_minus_cos_theta_encounter_effective_ZnS += oneMinusCosTheta;
+        event.sum_cos2_theta_encounter_effective_ZnS += cos2Theta;
+      }
+      ++event.num_particle_scatter_ZnS;
+      event.sum_cos_theta_particle_ZnS += cosTheta;
+    }
   }
 
   StageDReentryDiagnosticRecord MakeReentryDiagnosticRecord(
@@ -261,21 +593,16 @@ const DetectorConstruction *StageDOpticalSteppingAction::ResolveDetector() const
 G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
     const G4Step *step,
     G4Track *track,
-    const DetectorConstruction *detector)
+    const DetectorConstruction *detector,
+    DetectorConstruction::Phase prePhase)
 {
   if (fConfig == nullptr || fEventAction == nullptr || detector == nullptr)
     return false;
 
   auto &event = fEventAction->MutableCurrentEvent();
-  const G4ThreeVector postPos = step->GetPostStepPoint()->GetPosition();
-  const G4bool outOfBox = IsOutsideRve(postPos, detector);
-  if (!outOfBox)
-    return false;
-
   if (fConfig->stageD_boundary_mode == "escape")
   {
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
+    fEventAction->MarkCensoredEncounterIfActive();
     fEventAction->SetFinalStatus("escaped_debug", false);
     track->SetTrackStatus(fStopAndKill);
     return true;
@@ -286,8 +613,6 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
 
   if (event.num_reentry >= fConfig->stageD_max_reentry)
   {
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("max_reentry", false);
     track->SetTrackStatus(fStopAndKill);
     return true;
@@ -302,15 +627,61 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
 
   const G4ThreeVector prePos = step->GetPreStepPoint()->GetPosition();
   const G4ThreeVector oldDir = step->GetPreStepPoint()->GetMomentumDirection();
-  G4ThreeVector exitPoint = prePos;
+  const G4ThreeVector oldPolarization = step->GetPreStepPoint()->GetPolarization();
+  const G4ThreeVector postPos = step->GetPostStepPoint()->GetPosition();
+  if (oldDir.mag2() <= 0.0)
+  {
+    StageDReentrySampler::ReentryDiagnostics diag;
+    diag.exitPhase = prePhase;
+    diag.exitInsidePoint = postPos;
+    diag.strategy = "invalid_exit_direction";
+    diag.fallbackLevel = "unsupported_exit_direction";
+    StageDReentrySampler::ReentryContext ctx;
+    ctx.phase = prePhase;
+    ctx.prePos = prePos;
+    ctx.postPos = postPos;
+    ctx.oldDir = oldDir;
+    ctx.exitPoint = postPos;
+    ctx.exitInsidePoint = postPos;
+    ctx.wavelengthNm = event.wavelength_nm;
+    ctx.eventID = event.photonID;
+    ctx.reentryIndex = event.num_reentry + event.num_reentry_failed + 1;
+    if (fRunAction != nullptr)
+      fRunAction->RecordReentryDiagnostic(MakeReentryDiagnosticRecord(ctx, diag));
+    ++event.num_reentry_failed;
+    fEventAction->SetFinalStatus("reentry_failed", false);
+    track->SetTrackStatus(fStopAndKill);
+    return true;
+  }
+
+  G4ThreeVector exitPoint = postPos;
   ComputeExitPointOnRveBox(prePos, oldDir, detector, exitPoint);
   const G4ThreeVector exitInsidePoint = exitPoint - kBoundaryEpsilon * oldDir.unit();
 
-  auto phase = fReentrySampler->FastPhaseAtPointForReentry(exitInsidePoint);
-  if (phase == DetectorConstruction::Phase::World ||
-      phase == DetectorConstruction::Phase::Unknown)
+  auto phase = prePhase;
+  if (!IsReentryPhase(phase))
   {
-    phase = fReentrySampler->FastPhaseAtPointForReentry(prePos);
+    phase = fReentrySampler->FastPhaseAtPointForReentry(exitInsidePoint);
+    if (phase == DetectorConstruction::Phase::World ||
+        phase == DetectorConstruction::Phase::Unknown)
+    {
+      phase = fReentrySampler->FastPhaseAtPointForReentry(prePos);
+    }
+  }
+
+  if (event.encounter_active)
+  {
+    const auto encounterPhase = PhaseFromLabel(event.encounter_particle_phase);
+    if (!IsParticlePhase(prePhase) || encounterPhase != prePhase)
+    {
+      ++event.num_inconsistent_encounter_state;
+      fEventAction->MarkCensoredEncounterIfActive();
+    }
+  }
+  else if (event.source_inside_particle_pending_exit && !IsParticlePhase(prePhase))
+  {
+    ++event.num_inconsistent_encounter_state;
+    fEventAction->MarkCensoredEncounterIfActive();
   }
 
   StageDReentrySampler::ReentryContext ctx;
@@ -335,8 +706,6 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
     if (fRunAction != nullptr)
       fRunAction->RecordReentryDiagnostic(MakeReentryDiagnosticRecord(ctx, diag));
     ++event.num_reentry_failed;
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("reentry_failed", false);
     track->SetTrackStatus(fStopAndKill);
     return true;
@@ -350,8 +719,6 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
   if (!ok)
   {
     ++event.num_reentry_failed;
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("reentry_failed", false);
     track->SetTrackStatus(fStopAndKill);
     return true;
@@ -360,8 +727,8 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
   auto *dynamicParticle = new G4DynamicParticle(
       G4OpticalPhoton::OpticalPhotonDefinition(),
       oldDir,
-      track->GetKineticEnergy());
-  dynamicParticle->SetPolarization(track->GetPolarization());
+      step->GetPreStepPoint()->GetKineticEnergy());
+  dynamicParticle->SetPolarization(oldPolarization);
 
   auto *continuationTrack = new G4Track(
       dynamicParticle,
@@ -377,8 +744,6 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
   {
     delete continuationTrack;
     ++event.num_reentry_failed;
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
     fEventAction->SetFinalStatus("reentry_failed", false);
     track->SetTrackStatus(fStopAndKill);
     return true;
@@ -394,8 +759,6 @@ G4bool StageDOpticalSteppingAction::HandleBoundaryReentry(
     ++event.num_reentry_matrix;
   AccumulateReentryCounters(event, diag);
 
-  event.in_particle_segment = false;
-  event.particle_segment_phase.clear();
   track->SetTrackStatus(fStopAndKill);
   return true;
 }
@@ -439,6 +802,18 @@ G4bool StageDOpticalSteppingAction::HandleLimitKills(const G4Step *step, G4Track
     const auto *prePoint = step->GetPreStepPoint();
     const auto *prePV = (prePoint != nullptr) ? prePoint->GetPhysicalVolume() : nullptr;
     const auto phase = PhaseFromPhysicalVolume(prePV);
+    if ((event.encounter_active ||
+         event.source_inside_particle_pending_exit) &&
+        IsParticlePhase(phase))
+    {
+      fEventAction->MarkCensoredEncounterIfActive();
+    }
+    else if (event.encounter_active ||
+             event.source_inside_particle_pending_exit)
+    {
+      ++event.num_inconsistent_encounter_state;
+      fEventAction->MarkCensoredEncounterIfActive();
+    }
     fEventAction->MarkAbsorbed(DetectorConstruction::PhaseName(phase));
     return false;
   }
@@ -471,14 +846,15 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
     return;
 
   const auto *detector = ResolveDetector();
-  const G4bool isOuterRveExit =
-      (detector != nullptr && IsOutsideRve(postPoint->GetPosition(), detector));
+  RveFace outerFace = RveFace::None;
+  const G4bool isOuterRveBoundary =
+      (detector != nullptr && IsRveOuterBoundaryStep(step, detector, &outerFace));
   const auto *prePV = prePoint->GetPhysicalVolume();
   const auto *postPV = postPoint->GetPhysicalVolume();
   const auto prePhase = PhaseFromPhysicalVolume(prePV);
   const auto postPhase =
-      isOuterRveExit ? DetectorConstruction::Phase::World
-                     : PhaseFromPhysicalVolume(postPV);
+      isOuterRveBoundary ? DetectorConstruction::Phase::World
+                         : PhaseFromPhysicalVolume(postPV);
 
   const G4double stepLengthUm = step->GetStepLength() / um;
   if (prePhase == DetectorConstruction::Phase::BN)
@@ -491,9 +867,48 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
     event.path_length_world_um += stepLengthUm;
 
   const std::string processName = ProcessName(postPoint);
+  const G4OpBoundaryProcessStatus boundaryStatus = CurrentBoundaryStatus();
+  const G4ThreeVector preDir = prePoint->GetMomentumDirection();
+  const G4ThreeVector postDir = postPoint->GetMomentumDirection();
+  const G4bool isGeomBoundary = (postPoint->GetStepStatus() == fGeomBoundary);
+
+  if (isOuterRveBoundary)
+  {
+    ++event.num_outer_boundary_hits;
+    AccumulateOuterBoundaryStatus(event, boundaryStatus);
+
+    const G4int reentryFailedBefore = event.num_reentry_failed;
+    const G4int reentryBefore = event.num_reentry;
+    if (HandleBoundaryReentry(step, track, detector, prePhase))
+    {
+      if (event.num_reentry > reentryBefore)
+      {
+        ++event.num_outer_boundary_reentry_success;
+      }
+      else if (event.num_reentry_failed > reentryFailedBefore ||
+               event.final_status == "reentry_failed" ||
+               event.final_status == "max_reentry" ||
+               event.final_status == "escaped_debug")
+      {
+        ++event.num_outer_boundary_reentry_failed;
+      }
+      else
+      {
+        ++event.num_outer_boundary_reentry_failed;
+      }
+      return;
+    }
+
+    ++event.num_outer_boundary_reentry_failed;
+    fEventAction->MarkCensoredEncounterIfActive();
+    fEventAction->SetFinalStatus("reentry_failed", false);
+    track->SetTrackStatus(fStopAndKill);
+    return;
+  }
+
   const G4bool isMaterialBoundary =
-      !isOuterRveExit &&
-      (processName == "OpBoundary" ||
+      (isGeomBoundary ||
+       processName == "OpBoundary" ||
        (prePhase != DetectorConstruction::Phase::Unknown &&
         postPhase != DetectorConstruction::Phase::Unknown &&
         prePhase != postPhase &&
@@ -504,102 +919,92 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
     ++event.num_material_boundary;
   }
 
-  const G4ThreeVector preDir = prePoint->GetMomentumDirection();
-  const G4ThreeVector postDir = postPoint->GetMomentumDirection();
-
-  if (IsParticlePhase(prePhase) &&
-      (!event.in_particle_segment || event.particle_segment_phase != DetectorConstruction::PhaseName(prePhase)))
+  if (prePhase == DetectorConstruction::Phase::Matrix &&
+      isMaterialBoundary &&
+      !IsPhaseTransmission(prePhase, postPhase) &&
+      IsBoundaryReflection(boundaryStatus))
   {
-    event.in_particle_segment = true;
-    event.particle_segment_phase = DetectorConstruction::PhaseName(prePhase);
-    event.particle_segment_entry_direction = preDir;
+    DetectorConstruction::Phase particlePhase = postPhase;
+    if (!IsParticlePhase(particlePhase) && detector != nullptr)
+      particlePhase = ProbeForwardPhase(step, detector, preDir);
+    if (IsParticlePhase(particlePhase))
+    {
+      RecordCompleteEncounter(event, ClampCosTheta(preDir, postDir), particlePhase, fConfig);
+      ++event.num_surface_reflection_encounter;
+    }
+    else
+    {
+      ++event.num_unknown_particle_reflection;
+    }
+  }
+  else if (prePhase == DetectorConstruction::Phase::Matrix &&
+           IsParticlePhase(postPhase) &&
+           (IsPhaseTransmission(prePhase, postPhase) ||
+            IsBoundaryTransmission(boundaryStatus)))
+  {
+    if (event.encounter_active || event.source_inside_particle_pending_exit)
+    {
+      ++event.num_inconsistent_encounter_state;
+      fEventAction->MarkCensoredEncounterIfActive();
+    }
+    event.encounter_active = true;
+    event.encounter_has_matrix_entry = true;
+    event.encounter_particle_phase = DetectorConstruction::PhaseName(postPhase);
+    event.encounter_matrix_entry_direction = preDir;
+  }
+  else if (IsParticlePhase(prePhase) &&
+           postPhase == DetectorConstruction::Phase::Matrix &&
+           (IsPhaseTransmission(prePhase, postPhase) ||
+            IsBoundaryTransmission(boundaryStatus)))
+  {
+    const auto encounterPhase = PhaseFromLabel(event.encounter_particle_phase);
+    if (event.source_inside_particle_pending_exit &&
+        (!event.encounter_active || !event.encounter_has_matrix_entry))
+    {
+      ++event.num_incomplete_initial_particle_exit;
+      event.source_inside_particle_pending_exit = false;
+      event.encounter_particle_phase.clear();
+    }
+    else if (event.encounter_active &&
+             event.encounter_has_matrix_entry &&
+             encounterPhase == prePhase)
+    {
+      RecordCompleteEncounter(
+          event,
+          ClampCosTheta(event.encounter_matrix_entry_direction, postDir),
+          prePhase,
+          fConfig);
+      event.encounter_active = false;
+      event.encounter_has_matrix_entry = false;
+      event.encounter_particle_phase.clear();
+    }
+    else
+    {
+      ++event.num_inconsistent_encounter_state;
+      fEventAction->MarkCensoredEncounterIfActive();
+    }
+  }
+  else if (event.encounter_active &&
+           IsParticlePhase(prePhase) &&
+           prePhase == PhaseFromLabel(event.encounter_particle_phase) &&
+           IsBoundaryReflection(boundaryStatus))
+  {
+    // Internal particle reflections do not complete a matrix-to-matrix encounter.
+  }
+  else if (IsParticlePhase(prePhase) &&
+           IsParticlePhase(postPhase) &&
+           prePhase != postPhase)
+  {
+    ++event.num_particle_to_particle_boundary;
   }
 
-  const G4bool isParticleExitInsideRve =
-      event.in_particle_segment &&
-      IsParticlePhase(prePhase) &&
-      prePhase != postPhase &&
-      !isOuterRveExit &&
-      postPhase != DetectorConstruction::Phase::World;
-
-  if (isParticleExitInsideRve)
-  {
-    const G4double cosTheta = ClampCosTheta(
-        event.particle_segment_entry_direction,
-        postDir);
-    const G4double oneMinusCosTheta = 1.0 - cosTheta;
-    const G4double cos2Theta = cosTheta * cosTheta;
-    const G4double thetaDeg = std::acos(cosTheta) / deg;
-    const G4bool useThresholdedEncounterMetric =
-        UsesAngleThresholdEncounterMetric(fConfig);
-    const G4bool passesEncounterThreshold =
-        (fConfig != nullptr)
-            ? (thetaDeg >= fConfig->stageD_theta_threshold_deg)
-            : true;
-
-    ++event.num_encounter_total;
-    event.sum_cos_theta_encounter += cosTheta;
-    event.sum_one_minus_cos_theta_encounter += oneMinusCosTheta;
-    event.sum_cos2_theta_encounter += cos2Theta;
-    if (passesEncounterThreshold)
-    {
-      ++event.num_encounter_effective_total;
-      event.sum_cos_theta_encounter_effective += cosTheta;
-      event.sum_one_minus_cos_theta_encounter_effective += oneMinusCosTheta;
-      event.sum_cos2_theta_encounter_effective += cos2Theta;
-    }
-    if (!useThresholdedEncounterMetric || passesEncounterThreshold)
-    {
-      ++event.phase_function_histogram[PhaseFunctionBin(cosTheta)];
-    }
-
-    ++event.num_particle_scatter;
-    event.sum_cos_theta_particle += cosTheta;
-
-    if (prePhase == DetectorConstruction::Phase::BN)
-    {
-      ++event.num_encounter_BN;
-      event.sum_cos_theta_encounter_BN += cosTheta;
-      event.sum_one_minus_cos_theta_encounter_BN += oneMinusCosTheta;
-      event.sum_cos2_theta_encounter_BN += cos2Theta;
-      if (passesEncounterThreshold)
-      {
-        ++event.num_encounter_effective_BN;
-        event.sum_cos_theta_encounter_effective_BN += cosTheta;
-        event.sum_one_minus_cos_theta_encounter_effective_BN += oneMinusCosTheta;
-        event.sum_cos2_theta_encounter_effective_BN += cos2Theta;
-      }
-
-      ++event.num_particle_scatter_BN;
-      event.sum_cos_theta_particle_BN += cosTheta;
-    }
-    else if (prePhase == DetectorConstruction::Phase::ZnS)
-    {
-      ++event.num_encounter_ZnS;
-      event.sum_cos_theta_encounter_ZnS += cosTheta;
-      event.sum_one_minus_cos_theta_encounter_ZnS += oneMinusCosTheta;
-      event.sum_cos2_theta_encounter_ZnS += cos2Theta;
-      if (passesEncounterThreshold)
-      {
-        ++event.num_encounter_effective_ZnS;
-        event.sum_cos_theta_encounter_effective_ZnS += cosTheta;
-        event.sum_one_minus_cos_theta_encounter_effective_ZnS += oneMinusCosTheta;
-        event.sum_cos2_theta_encounter_effective_ZnS += cos2Theta;
-      }
-
-      ++event.num_particle_scatter_ZnS;
-      event.sum_cos_theta_particle_ZnS += cosTheta;
-    }
-
-    event.in_particle_segment = false;
-    event.particle_segment_phase.clear();
-  }
-
-  if (!isOuterRveExit && processName != "OpAbsorption")
+  if (processName != "OpAbsorption")
   {
     const G4double thetaDeg =
         AngleDeg(preDir, postDir);
-    if (thetaDeg > fConfig->stageD_theta_threshold_deg)
+    const G4double thetaThresholdDeg =
+        (fConfig != nullptr) ? fConfig->stageD_theta_threshold_deg : 0.0;
+    if (thetaDeg > thetaThresholdDeg)
     {
       ++event.num_real_scatter;
       const G4double cosTheta = std::clamp(
@@ -628,9 +1033,6 @@ void StageDOpticalSteppingAction::UserSteppingAction(const G4Step *step)
       }
     }
   }
-
-  if (detector != nullptr && HandleBoundaryReentry(step, track, detector))
-    return;
 
   HandleLimitKills(step, track);
 }

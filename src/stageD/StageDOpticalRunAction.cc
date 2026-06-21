@@ -12,6 +12,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace
@@ -233,6 +234,23 @@ void StageDOpticalRunAction::WriteEventHeader()
       << "num_boundary_scatter_BN_debug,"
       << "num_boundary_scatter_ZnS_debug,"
       << "num_material_boundary,"
+      << "num_complete_encounter_total,"
+      << "num_complete_encounter_BN,"
+      << "num_complete_encounter_ZnS,"
+      << "num_surface_reflection_encounter,"
+      << "num_incomplete_initial_particle_exit,"
+      << "num_censored_particle_encounter,"
+      << "num_inconsistent_encounter_state,"
+      << "num_particle_to_particle_boundary,"
+      << "num_unknown_particle_reflection,"
+      << "num_outer_boundary_hits,"
+      << "num_outer_boundary_reentry_success,"
+      << "num_outer_boundary_reentry_failed,"
+      << "num_outer_boundary_fresnel_reflection,"
+      << "num_outer_boundary_total_internal_reflection,"
+      << "num_outer_boundary_refraction,"
+      << "num_outer_boundary_transmission,"
+      << "num_outer_boundary_other_status,"
       << "num_reentry,"
       << "num_reentry_BN,"
       << "num_reentry_ZnS,"
@@ -435,6 +453,23 @@ void StageDOpticalRunAction::RecordPhotonEvent(const StageDPhotonEventRecord &ev
       << event.num_boundary_scatter_BN << ","
       << event.num_boundary_scatter_ZnS << ","
       << event.num_material_boundary << ","
+      << event.num_complete_encounter_total << ","
+      << event.num_complete_encounter_BN << ","
+      << event.num_complete_encounter_ZnS << ","
+      << event.num_surface_reflection_encounter << ","
+      << event.num_incomplete_initial_particle_exit << ","
+      << event.num_censored_particle_encounter << ","
+      << event.num_inconsistent_encounter_state << ","
+      << event.num_particle_to_particle_boundary << ","
+      << event.num_unknown_particle_reflection << ","
+      << event.num_outer_boundary_hits << ","
+      << event.num_outer_boundary_reentry_success << ","
+      << event.num_outer_boundary_reentry_failed << ","
+      << event.num_outer_boundary_fresnel_reflection << ","
+      << event.num_outer_boundary_total_internal_reflection << ","
+      << event.num_outer_boundary_refraction << ","
+      << event.num_outer_boundary_transmission << ","
+      << event.num_outer_boundary_other_status << ","
       << event.num_reentry << ","
       << event.num_reentry_BN << ","
       << event.num_reentry_ZnS << ","
@@ -566,6 +601,24 @@ void StageDOpticalRunAction::WriteSummaryFile() const
   G4long totalBoundaryScatter = 0;
   G4long totalBoundaryScatterBN = 0;
   G4long totalBoundaryScatterZnS = 0;
+  G4long totalMaterialBoundary = 0;
+  G4long totalCompleteEncounter = 0;
+  G4long totalCompleteEncounterBN = 0;
+  G4long totalCompleteEncounterZnS = 0;
+  G4long totalSurfaceReflectionEncounter = 0;
+  G4long totalIncompleteInitialParticleExit = 0;
+  G4long totalCensoredParticleEncounter = 0;
+  G4long totalInconsistentEncounterState = 0;
+  G4long totalParticleToParticleBoundary = 0;
+  G4long totalUnknownParticleReflection = 0;
+  G4long totalOuterBoundaryHits = 0;
+  G4long totalOuterBoundaryReentrySuccess = 0;
+  G4long totalOuterBoundaryReentryFailed = 0;
+  G4long totalOuterBoundaryFresnelReflection = 0;
+  G4long totalOuterBoundaryTotalInternalReflection = 0;
+  G4long totalOuterBoundaryRefraction = 0;
+  G4long totalOuterBoundaryTransmission = 0;
+  G4long totalOuterBoundaryOtherStatus = 0;
   G4long totalReentry = 0;
   G4long totalReentryBN = 0;
   G4long totalReentryZnS = 0;
@@ -648,6 +701,24 @@ void StageDOpticalRunAction::WriteSummaryFile() const
     totalBoundaryScatter += event.num_boundary_scatter;
     totalBoundaryScatterBN += event.num_boundary_scatter_BN;
     totalBoundaryScatterZnS += event.num_boundary_scatter_ZnS;
+    totalMaterialBoundary += event.num_material_boundary;
+    totalCompleteEncounter += event.num_complete_encounter_total;
+    totalCompleteEncounterBN += event.num_complete_encounter_BN;
+    totalCompleteEncounterZnS += event.num_complete_encounter_ZnS;
+    totalSurfaceReflectionEncounter += event.num_surface_reflection_encounter;
+    totalIncompleteInitialParticleExit += event.num_incomplete_initial_particle_exit;
+    totalCensoredParticleEncounter += event.num_censored_particle_encounter;
+    totalInconsistentEncounterState += event.num_inconsistent_encounter_state;
+    totalParticleToParticleBoundary += event.num_particle_to_particle_boundary;
+    totalUnknownParticleReflection += event.num_unknown_particle_reflection;
+    totalOuterBoundaryHits += event.num_outer_boundary_hits;
+    totalOuterBoundaryReentrySuccess += event.num_outer_boundary_reentry_success;
+    totalOuterBoundaryReentryFailed += event.num_outer_boundary_reentry_failed;
+    totalOuterBoundaryFresnelReflection += event.num_outer_boundary_fresnel_reflection;
+    totalOuterBoundaryTotalInternalReflection += event.num_outer_boundary_total_internal_reflection;
+    totalOuterBoundaryRefraction += event.num_outer_boundary_refraction;
+    totalOuterBoundaryTransmission += event.num_outer_boundary_transmission;
+    totalOuterBoundaryOtherStatus += event.num_outer_boundary_other_status;
     totalReentry += event.num_reentry;
     totalReentryBN += event.num_reentry_BN;
     totalReentryZnS += event.num_reentry_ZnS;
@@ -702,6 +773,7 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       useThresholdedEncounterMetric ? totalEncounterEffectiveBN : totalEncounterBN;
   const G4long primaryEncounterCountZnS =
       useThresholdedEncounterMetric ? totalEncounterEffectiveZnS : totalEncounterZnS;
+  const G4double nan = std::numeric_limits<G4double>::quiet_NaN();
   const G4double primarySumCosThetaEncounter =
       useThresholdedEncounterMetric ? sumCosThetaEncounterEffective : sumCosThetaEncounter;
   const G4double primarySumCosThetaEncounterBN =
@@ -733,30 +805,34 @@ void StageDOpticalRunAction::WriteSummaryFile() const
                                        : 0.0;
   const G4double g1Encounter = (primaryEncounterCount > 0)
                                    ? primarySumCosThetaEncounter / static_cast<G4double>(primaryEncounterCount)
-                                   : 0.0;
+                                   : nan;
   const G4double g1EncounterBN = (primaryEncounterCountBN > 0)
                                      ? primarySumCosThetaEncounterBN / static_cast<G4double>(primaryEncounterCountBN)
-                                     : 0.0;
+                                     : nan;
   const G4double g1EncounterZnS = (primaryEncounterCountZnS > 0)
                                       ? primarySumCosThetaEncounterZnS / static_cast<G4double>(primaryEncounterCountZnS)
-                                      : 0.0;
+                                      : nan;
   const G4double g1EncounterRaw = (totalEncounter > 0)
                                       ? sumCosThetaEncounter / static_cast<G4double>(totalEncounter)
-                                      : 0.0;
+                                      : nan;
   const G4double g1EncounterRawBN = (totalEncounterBN > 0)
                                         ? sumCosThetaEncounterBN / static_cast<G4double>(totalEncounterBN)
-                                        : 0.0;
+                                        : nan;
   const G4double g1EncounterRawZnS = (totalEncounterZnS > 0)
                                          ? sumCosThetaEncounterZnS / static_cast<G4double>(totalEncounterZnS)
-                                         : 0.0;
+                                         : nan;
   const G4double meanCos2Encounter = (primaryEncounterCount > 0)
                                          ? primarySumCos2ThetaEncounter / static_cast<G4double>(primaryEncounterCount)
-                                         : 0.0;
+                                         : nan;
   const G4double meanCos2EncounterRaw = (totalEncounter > 0)
                                             ? sumCos2ThetaEncounter / static_cast<G4double>(totalEncounter)
-                                            : 0.0;
-  const G4double g2Encounter = 0.5 * (3.0 * meanCos2Encounter - 1.0);
-  const G4double g2EncounterRaw = 0.5 * (3.0 * meanCos2EncounterRaw - 1.0);
+                                            : nan;
+  const G4double g2Encounter = (primaryEncounterCount > 0)
+                                   ? 0.5 * (3.0 * meanCos2Encounter - 1.0)
+                                   : nan;
+  const G4double g2EncounterRaw = (totalEncounter > 0)
+                                      ? 0.5 * (3.0 * meanCos2EncounterRaw - 1.0)
+                                      : nan;
   const G4double muSPrimeDirectEncounter = (totalMediumPathLengthUm > 0.0)
                                                ? primarySumOneMinusCosThetaEncounter / totalMediumPathLengthUm
                                                : 0.0;
@@ -824,6 +900,49 @@ void StageDOpticalRunAction::WriteSummaryFile() const
   const G4double muSPrimeStepTotal = muSStepTotal * (1.0 - gStepRaw);
   const G4double muSPrimeBulk = muSBulk * (1.0 - gBulk);
   const G4double muSPrimeBoundary = muSBoundary * (1.0 - gBoundary);
+  const G4double particleToParticleBoundaryFraction =
+      (totalMaterialBoundary > 0)
+          ? static_cast<G4double>(totalParticleToParticleBoundary) /
+                static_cast<G4double>(totalMaterialBoundary)
+          : 0.0;
+
+  if (particleToParticleBoundaryFraction > 1.0e-6)
+  {
+    G4cout << "[StageDOpticalRunAction] Warning: direct particle-to-particle boundaries detected."
+           << " total_particle_to_particle_boundary=" << totalParticleToParticleBoundary
+           << " fraction_of_material_boundaries=" << particleToParticleBoundaryFraction
+           << ". Matrix-entry/matrix-exit encounter statistics may be incomplete for this geometry."
+           << G4endl;
+  }
+
+  if (totalOuterBoundaryHits !=
+      totalOuterBoundaryReentrySuccess + totalOuterBoundaryReentryFailed)
+  {
+    G4cout << "[StageDOpticalRunAction] Warning: outer boundary diagnostic mismatch."
+           << " hits=" << totalOuterBoundaryHits
+           << " success=" << totalOuterBoundaryReentrySuccess
+           << " failed=" << totalOuterBoundaryReentryFailed
+           << G4endl;
+  }
+
+  if (fConfig != nullptr &&
+      fConfig->stageD_boundary_mode == "same_phase_reentry" &&
+      totalOuterBoundaryReentryFailed > 0)
+  {
+    G4cout << "[StageDOpticalRunAction] Warning: outer boundary re-entry failures detected."
+           << " failed=" << totalOuterBoundaryReentryFailed
+           << ". Production same_phase_reentry runs should have zero failures."
+           << G4endl;
+  }
+
+  if (fConfig != nullptr &&
+      fConfig->stageD_boundary_mode == "same_phase_reentry" &&
+      std::abs(totalPathLengthWorldUm) > 1.0e-6)
+  {
+    G4cout << "[StageDOpticalRunAction] Warning: nonzero World path length in same_phase_reentry mode."
+           << " path_length_World_um=" << totalPathLengthWorldUm
+           << G4endl;
+  }
 
   fout
       << "ratio,"
@@ -887,6 +1006,24 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << "mean_num_bulk_scatter_debug,"
       << "total_boundary_scatter_debug,"
       << "mean_num_boundary_scatter_debug,"
+      << "total_complete_encounter,"
+      << "total_complete_encounter_BN,"
+      << "total_complete_encounter_ZnS,"
+      << "total_surface_reflection_encounter,"
+      << "total_incomplete_initial_particle_exit,"
+      << "total_censored_particle_encounter,"
+      << "total_inconsistent_encounter_state,"
+      << "total_particle_to_particle_boundary,"
+      << "particle_to_particle_boundary_fraction,"
+      << "total_unknown_particle_reflection,"
+      << "total_outer_boundary_hits,"
+      << "total_outer_boundary_reentry_success,"
+      << "total_outer_boundary_reentry_failed,"
+      << "total_outer_boundary_fresnel_reflection,"
+      << "total_outer_boundary_total_internal_reflection,"
+      << "total_outer_boundary_refraction,"
+      << "total_outer_boundary_transmission,"
+      << "total_outer_boundary_other_status,"
       << "total_reentry,"
       << "mean_num_reentry,"
       << "total_reentry_BN,"
@@ -1014,6 +1151,24 @@ void StageDOpticalRunAction::WriteSummaryFile() const
       << static_cast<G4double>(totalBulkScatter) / nPhotonsD << ","
       << totalBoundaryScatter << ","
       << static_cast<G4double>(totalBoundaryScatter) / nPhotonsD << ","
+      << totalCompleteEncounter << ","
+      << totalCompleteEncounterBN << ","
+      << totalCompleteEncounterZnS << ","
+      << totalSurfaceReflectionEncounter << ","
+      << totalIncompleteInitialParticleExit << ","
+      << totalCensoredParticleEncounter << ","
+      << totalInconsistentEncounterState << ","
+      << totalParticleToParticleBoundary << ","
+      << particleToParticleBoundaryFraction << ","
+      << totalUnknownParticleReflection << ","
+      << totalOuterBoundaryHits << ","
+      << totalOuterBoundaryReentrySuccess << ","
+      << totalOuterBoundaryReentryFailed << ","
+      << totalOuterBoundaryFresnelReflection << ","
+      << totalOuterBoundaryTotalInternalReflection << ","
+      << totalOuterBoundaryRefraction << ","
+      << totalOuterBoundaryTransmission << ","
+      << totalOuterBoundaryOtherStatus << ","
       << totalReentry << ","
       << static_cast<G4double>(totalReentry) / nPhotonsD << ","
       << totalReentryBN << ","

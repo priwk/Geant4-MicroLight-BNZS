@@ -772,8 +772,6 @@ void AnalysisMessenger::SetNewValue(G4UIcommand *command, G4String newValue)
       return;
     }
     fConfig->stageD_reentry_mode = normalized;
-    if (normalized == "state_matched")
-      fConfig->stageD_particle_reentry_mode = "sphere_q_mu";
     G4cout << "[AnalysisMessenger] stageD_reentry_mode set to "
            << fConfig->stageD_reentry_mode
            << G4endl;

@@ -25,6 +25,7 @@ public:
 
   void SetFinalStatus(const std::string &status, G4bool absorbed);
   void MarkAbsorbed(const std::string &phaseLabel);
+  void MarkCensoredEncounterIfActive();
 
 private:
   AnalysisConfig *fConfig;
