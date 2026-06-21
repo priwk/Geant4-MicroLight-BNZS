@@ -249,7 +249,7 @@ AnalysisConfig::AnalysisConfig()
       stageD_matrix_reentry_mode("clearance_binned_portal"),
       stageD_scatter_metric("particle_encounter_angle_threshold"),
       stageD_target_primary_scatter(0),
-      stageD_theta_threshold_deg(0.5),
+      stageD_theta_threshold_deg(0.1),
       stageD_max_reentry(10000),
       stageD_max_steps(100000),
       stageD_max_path_length_um(5000.0),

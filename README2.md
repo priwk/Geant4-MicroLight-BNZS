@@ -148,7 +148,7 @@ cat >/tmp/stageD_run.mac <<'EOF'
 /cfg/stageD/setParticleReentryMode sphere_q_mu
 /cfg/stageD/setMatrixReentryMode clearance_binned_portal
 /cfg/stageD/setTargetPrimaryScatter 0
-/cfg/stageD/setThetaThresholdDeg 0.5
+/cfg/stageD/setThetaThresholdDeg 0.1
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000
 /cfg/stageD/setMaxPathLengthUm 1000000

@@ -84,7 +84,7 @@ StageD 使用多套随机 RVE 的同相统计重入来近似无限随机浑浊�
 /cfg/stageD/setSourceMode uniform_all_phase
 /cfg/stageD/setBoundaryMode same_phase_reentry
 /cfg/stageD/setTargetPrimaryScatter 0
-/cfg/stageD/setThetaThresholdDeg 0.5
+/cfg/stageD/setThetaThresholdDeg 0.1
 /cfg/stageD/setMaxReentry 10000
 /cfg/stageD/setMaxSteps 100000
 /cfg/stageD/setMaxPathLengthUm 1000000
