@@ -138,7 +138,7 @@ def parse_args():
     parser.add_argument(
         "--theta-threshold-deg",
         type=float,
-        default=0.5,
+        default=0.1,
         help="StageD effective scatter angle threshold.",
     )
     parser.add_argument(
