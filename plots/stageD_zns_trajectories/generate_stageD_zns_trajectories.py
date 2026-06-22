@@ -835,6 +835,36 @@ def trajectory_bounds(trajectories: list[Trajectory]) -> tuple[np.ndarray, np.nd
     return mins - pad, maxs + pad
 
 
+def origin_aligned_segments(
+    trajectories: list[Trajectory],
+) -> tuple[np.ndarray, list[str], list[str], np.ndarray]:
+    segments = []
+    particles = []
+    phases = []
+    edeps = []
+    for traj in trajectories:
+        if not traj.steps:
+            continue
+        origin = np.asarray(traj.steps[0].start, dtype=float)
+        for step in traj.steps:
+            start = tuple(np.asarray(step.start, dtype=float) - origin)
+            end = tuple(np.asarray(step.end, dtype=float) - origin)
+            segments.append([start, end])
+            particles.append(traj.particle)
+            phases.append(step.phase_pre)
+            edeps.append(step.edep_kev)
+    return np.asarray(segments, dtype=float), particles, phases, np.asarray(edeps, dtype=float)
+
+
+def origin_aligned_bounds(segments: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if segments.size == 0:
+        return np.asarray([-1.0, -1.0, -1.0]), np.asarray([1.0, 1.0, 1.0])
+    points = segments.reshape((-1, 3))
+    max_abs = float(np.max(np.abs(points)))
+    half = max(max_abs * 1.12, 1.0)
+    return np.asarray([-half, -half, -half]), np.asarray([half, half, half])
+
+
 def macro_trajectory_bounds(trajectories: list[Trajectory]) -> tuple[np.ndarray, np.ndarray] | None:
     points = []
     for traj in trajectories:
@@ -869,6 +899,20 @@ def style_axes(ax) -> None:
     ax.tick_params(direction="in", which="both", top=True, right=True, width=1.2)
     for spine in ax.spines.values():
         spine.set_linewidth(1.4)
+
+
+def emphasize_3d_axes(ax, half_range: float) -> None:
+    axis_limit = half_range * 1.02
+    ax.plot([-axis_limit, axis_limit], [0, 0], [0, 0], color="#111827", linewidth=2.2, alpha=0.95)
+    ax.plot([0, 0], [-axis_limit, axis_limit], [0, 0], color="#111827", linewidth=2.2, alpha=0.95)
+    ax.plot([0, 0], [0, 0], [-axis_limit, axis_limit], color="#111827", linewidth=2.2, alpha=0.95)
+    ax.text(axis_limit, 0, 0, "+x", color="#111827", fontsize=11, weight="bold")
+    ax.text(0, axis_limit, 0, "+y", color="#111827", fontsize=11, weight="bold")
+    ax.text(0, 0, axis_limit, "+z", color="#111827", fontsize=11, weight="bold")
+    ticks = np.linspace(-half_range, half_range, 5)
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.set_zticks(ticks)
 
 
 def plot_trajectory_showcase_3d(
@@ -931,6 +975,81 @@ def plot_trajectory_showcase_3d(
         Line2D([0], [0], color="#2d3436", lw=3.2, label="alpha width"),
         Line2D([0], [0], color="#2d3436", lw=2.0, label="Li7 width"),
         Line2D([0], [0], marker="o", color="none", markerfacecolor="#111827", markersize=5, label="track start"),
+    ]
+    ax.legend(handles=phase_handles + particle_handles, frameon=False, loc="upper left", fontsize=8.5)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_origin_aligned_trajectory_showcase_3d(
+    trajectories: list[Trajectory],
+    output_path: Path,
+    ratio: RatioKey,
+    thickness_um: float,
+) -> None:
+    segments, particles, phases, edeps = origin_aligned_segments(trajectories)
+    mins, maxs = origin_aligned_bounds(segments)
+    half_range = float(maxs[0])
+    edep_norm = Normalize(vmin=0.0, vmax=max(float(np.max(edeps)) if edeps.size else 1.0, 1.0))
+
+    fig = plt.figure(figsize=(10.4, 8.4))
+    ax = fig.add_subplot(111, projection="3d")
+    for phase in PHASE_ORDER:
+        mask = np.asarray([value == phase for value in phases], dtype=bool)
+        if not np.any(mask):
+            continue
+        widths = np.asarray(
+            [
+                PARTICLE_LINEWIDTH.get(particle, 1.0) + 1.15 * edep_norm(edep)
+                for particle, edep, keep in zip(particles, edeps, mask)
+                if keep
+            ],
+            dtype=float,
+        )
+        collection = Line3DCollection(
+            segments[mask],
+            colors=PHASE_COLORS.get(phase, PHASE_COLORS["unknown"]),
+            linewidths=widths,
+            alpha=0.58 if phase == "binder_void" else 0.8,
+        )
+        ax.add_collection3d(collection)
+
+    ax.scatter([0], [0], [0], c="#111827", s=64, marker="o", depthshade=False, label="aligned start")
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+    try:
+        ax.set_box_aspect((1, 1, 1))
+    except AttributeError:
+        pass
+    emphasize_3d_axes(ax, half_range)
+    ax.set_xlabel(f"relative x ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
+    ax.set_ylabel(f"relative y ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
+    ax.set_zlabel(f"relative z ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
+    mode_text = "full alpha/Li steps" if trajectories and trajectories[0].input_mode == "full" else "ZnS-only slim steps"
+    ax.set_title(
+        f"Origin-aligned alpha/Li trajectories ({mode_text})\n"
+        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}, "
+        f"n = {len(trajectories)}, axis half-range = {half_range:.1f} {mu_m_text()}"
+    )
+    ax.view_init(elev=24, azim=-45)
+    ax.grid(True, alpha=0.24, linewidth=0.8)
+    ax.tick_params(labelsize=9, pad=2)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    phases_present = set(phases)
+    phase_handles = [
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=phase)
+        for phase in PHASE_ORDER
+        if phase in phases_present
+    ]
+    particle_handles = [
+        Line2D([0], [0], color="#2d3436", lw=3.2, label="alpha width"),
+        Line2D([0], [0], color="#2d3436", lw=2.0, label="Li7 width"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#111827", markersize=7, label="aligned start"),
     ]
     ax.legend(handles=phase_handles + particle_handles, frameon=False, loc="upper left", fontsize=8.5)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1343,6 +1462,12 @@ def main() -> int:
         showcase_ratio,
         showcase_thickness,
     )
+    plot_origin_aligned_trajectory_showcase_3d(
+        trajectories,
+        output_dir / "stageD_origin_aligned_trajectory_showcase_3d.png",
+        showcase_ratio,
+        showcase_thickness,
+    )
     wrote_macro_showcase = plot_macro_trajectory_showcase_3d(
         trajectories,
         output_dir / "stageD_macro_trajectory_showcase_3d.png",
@@ -1368,6 +1493,7 @@ def main() -> int:
 
     print(f"Wrote {summary_csv}")
     print(f"Wrote {output_dir / 'stageD_zns_trajectory_showcase_3d.png'}")
+    print(f"Wrote {output_dir / 'stageD_origin_aligned_trajectory_showcase_3d.png'}")
     if wrote_macro_showcase:
         print(f"Wrote {output_dir / 'stageD_macro_trajectory_showcase_3d.png'}")
     print(f"Wrote {output_dir / 'stageD_zns_trajectory_projection_panels.png'}")
