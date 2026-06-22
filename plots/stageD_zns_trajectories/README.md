@@ -47,6 +47,7 @@ The script writes figures and a derived summary table to:
 Main outputs:
 
 - `stageD_zns_trajectory_showcase_3d.png`
+- `stageD_origin_aligned_trajectory_showcase_3d.png`
 - `stageD_macro_trajectory_showcase_3d.png`
 - `stageD_zns_trajectory_projection_panels.png`
 - `stageD_zns_trajectory_statistics_vs_thickness.png`
@@ -84,6 +85,12 @@ macro_x = capture_x_um + (local_x - local_capture_x_um)
 macro_y = capture_y_um + (local_y - local_capture_y_um)
 macro_z = depth_um     + (local_z - local_capture_z_um)
 ```
+
+`stageD_origin_aligned_trajectory_showcase_3d.png` is a display-only transform:
+each selected particle trajectory is translated so its first recorded point is
+at `(0, 0, 0)`. This does not modify the source CSV. The plot keeps phase colors
+and alpha/Li line-width encoding, and uses equal 3D axes with heavier axis lines
+so the approximate travel distance is visible at a glance.
 
 For the cloud server case where all six ratios have `1000_alpha_li_steps.csv`,
 run only the 1000 um files:
