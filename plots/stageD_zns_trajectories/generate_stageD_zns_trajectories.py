@@ -79,6 +79,14 @@ PHASE_COLORS = {
     "unknown": "#8e44ad",
 }
 PHASE_ORDER = ["BN", "ZnS", "binder_void", "outside", "world", "unknown"]
+PHASE_LABELS = {
+    "BN": "BN phase",
+    "ZnS": "ZnS phase",
+    "binder_void": "Binder/porosity phase",
+    "outside": "Outside domain",
+    "world": "Outside domain",
+    "unknown": "Unclassified phase",
+}
 
 
 @dataclass(frozen=True)
@@ -231,6 +239,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=500000,
         help="Maximum raw step rows scanned into candidate trajectories for showcase. Default: 500000.",
+    )
+    parser.add_argument(
+        "--only-origin-aligned",
+        action="store_true",
+        help=(
+            "Only generate stageD_origin_aligned_trajectory_showcase_3d.png. "
+            "This skips summary statistics and the other Stage D figures."
+        ),
     )
     parser.add_argument(
         "--max-files",
@@ -901,20 +917,6 @@ def style_axes(ax) -> None:
         spine.set_linewidth(1.4)
 
 
-def emphasize_3d_axes(ax, half_range: float) -> None:
-    axis_limit = half_range * 1.02
-    ax.plot([-axis_limit, axis_limit], [0, 0], [0, 0], color="#111827", linewidth=2.2, alpha=0.95)
-    ax.plot([0, 0], [-axis_limit, axis_limit], [0, 0], color="#111827", linewidth=2.2, alpha=0.95)
-    ax.plot([0, 0], [0, 0], [-axis_limit, axis_limit], color="#111827", linewidth=2.2, alpha=0.95)
-    ax.text(axis_limit, 0, 0, "+x", color="#111827", fontsize=11, weight="bold")
-    ax.text(0, axis_limit, 0, "+y", color="#111827", fontsize=11, weight="bold")
-    ax.text(0, 0, axis_limit, "+z", color="#111827", fontsize=11, weight="bold")
-    ticks = np.linspace(-half_range, half_range, 5)
-    ax.set_xticks(ticks)
-    ax.set_yticks(ticks)
-    ax.set_zticks(ticks)
-
-
 def plot_trajectory_showcase_3d(
     trajectories: list[Trajectory],
     output_path: Path,
@@ -955,10 +957,9 @@ def plot_trajectory_showcase_3d(
     ax.set_xlabel(f"x ({mu_m_text()})")
     ax.set_ylabel(f"y ({mu_m_text()})")
     ax.set_zlabel(f"z ({mu_m_text()})")
-    mode_text = "full alpha/Li steps" if trajectories and trajectories[0].input_mode == "full" else "ZnS-only slim steps"
     ax.set_title(
-        f"Alpha/Li particle trajectories in local RVE ({mode_text})\n"
-        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}, n = {len(trajectories)}"
+        f"Alpha and Li-7 Particle Trajectories\n"
+        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}"
     )
     ax.view_init(elev=22, azim=-52)
     ax.grid(True, alpha=0.16)
@@ -967,7 +968,7 @@ def plot_trajectory_showcase_3d(
     ax.zaxis.pane.fill = False
 
     phase_handles = [
-        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=phase)
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=PHASE_LABELS.get(phase, phase))
         for phase in PHASE_ORDER
         if phase in set(phases)
     ]
@@ -992,68 +993,78 @@ def plot_origin_aligned_trajectory_showcase_3d(
     mins, maxs = origin_aligned_bounds(segments)
     half_range = float(maxs[0])
     edep_norm = Normalize(vmin=0.0, vmax=max(float(np.max(edeps)) if edeps.size else 1.0, 1.0))
+    ticks = np.linspace(-half_range, half_range, 5)
 
-    fig = plt.figure(figsize=(10.4, 8.4))
-    ax = fig.add_subplot(111, projection="3d")
-    for phase in PHASE_ORDER:
-        mask = np.asarray([value == phase for value in phases], dtype=bool)
-        if not np.any(mask):
-            continue
-        widths = np.asarray(
-            [
-                PARTICLE_LINEWIDTH.get(particle, 1.0) + 1.15 * edep_norm(edep)
-                for particle, edep, keep in zip(particles, edeps, mask)
-                if keep
-            ],
-            dtype=float,
-        )
-        collection = Line3DCollection(
-            segments[mask],
-            colors=PHASE_COLORS.get(phase, PHASE_COLORS["unknown"]),
-            linewidths=widths,
-            alpha=0.58 if phase == "binder_void" else 0.8,
-        )
-        ax.add_collection3d(collection)
+    fig = plt.figure(figsize=(13.2, 6.7))
+    axes = [
+        fig.add_subplot(1, 2, 1, projection="3d"),
+        fig.add_subplot(1, 2, 2, projection="3d"),
+    ]
+    particle_titles = [("alpha", "Alpha Particle Trajectories"), ("Li7", "Li-7 Particle Trajectories")]
 
-    ax.scatter([0], [0], [0], c="#111827", s=64, marker="o", depthshade=False, label="aligned start")
-    ax.set_xlim(mins[0], maxs[0])
-    ax.set_ylim(mins[1], maxs[1])
-    ax.set_zlim(mins[2], maxs[2])
-    try:
-        ax.set_box_aspect((1, 1, 1))
-    except AttributeError:
-        pass
-    emphasize_3d_axes(ax, half_range)
-    ax.set_xlabel(f"relative x ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
-    ax.set_ylabel(f"relative y ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
-    ax.set_zlabel(f"relative z ({mu_m_text()})", labelpad=12, fontsize=13, weight="bold")
-    mode_text = "full alpha/Li steps" if trajectories and trajectories[0].input_mode == "full" else "ZnS-only slim steps"
-    ax.set_title(
-        f"Origin-aligned alpha/Li trajectories ({mode_text})\n"
-        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}, "
-        f"n = {len(trajectories)}, axis half-range = {half_range:.1f} {mu_m_text()}"
+    for ax, (particle_name, panel_title) in zip(axes, particle_titles):
+        particle_mask = np.asarray([value == particle_name for value in particles], dtype=bool)
+        for phase in PHASE_ORDER:
+            mask = particle_mask & np.asarray([value == phase for value in phases], dtype=bool)
+            if not np.any(mask):
+                continue
+            widths = np.asarray(
+                [0.72 + 0.72 * edep_norm(edep) for edep, keep in zip(edeps, mask) if keep],
+                dtype=float,
+            )
+            collection = Line3DCollection(
+                segments[mask],
+                colors=PHASE_COLORS.get(phase, PHASE_COLORS["unknown"]),
+                linewidths=widths,
+                alpha=0.48 if phase == "binder_void" else 0.72,
+            )
+            ax.add_collection3d(collection)
+
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
+        try:
+            ax.set_box_aspect((1, 1, 1))
+        except AttributeError:
+            pass
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        ax.set_zticks(ticks)
+        ax.set_xlabel(f"relative x ({mu_m_text()})", labelpad=9, fontsize=11, weight="bold")
+        ax.set_ylabel(f"relative y ({mu_m_text()})", labelpad=9, fontsize=11, weight="bold")
+        ax.set_zlabel(f"relative z ({mu_m_text()})", labelpad=9, fontsize=11, weight="bold")
+        ax.set_title(panel_title)
+        ax.view_init(elev=24, azim=-45)
+        ax.grid(True, alpha=0.28, linewidth=0.8)
+        ax.tick_params(labelsize=8, pad=1)
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+
+    fig.suptitle(
+        f"Origin-Aligned Alpha and Li-7 Particle Trajectories\n"
+        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}",
+        y=0.98,
+        fontsize=14,
     )
-    ax.view_init(elev=24, azim=-45)
-    ax.grid(True, alpha=0.24, linewidth=0.8)
-    ax.tick_params(labelsize=9, pad=2)
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
 
     phases_present = set(phases)
     phase_handles = [
-        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=phase)
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=2.4, label=PHASE_LABELS.get(phase, phase))
         for phase in PHASE_ORDER
         if phase in phases_present
     ]
-    particle_handles = [
-        Line2D([0], [0], color="#2d3436", lw=3.2, label="alpha width"),
-        Line2D([0], [0], color="#2d3436", lw=2.0, label="Li7 width"),
-        Line2D([0], [0], marker="o", color="none", markerfacecolor="#111827", markersize=7, label="aligned start"),
-    ]
-    ax.legend(handles=phase_handles + particle_handles, frameon=False, loc="upper left", fontsize=8.5)
+    fig.legend(
+        handles=phase_handles,
+        loc="lower center",
+        ncol=min(len(phase_handles), 6),
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.01),
+        fontsize=9,
+    )
+    fig.subplots_adjust(left=0.03, right=0.99, top=0.84, bottom=0.12, wspace=0.08)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
@@ -1122,8 +1133,8 @@ def plot_macro_trajectory_showcase_3d(
     ax.set_ylabel(f"macro y ({mu_m_text()})")
     ax.set_zlabel(f"capture depth ({mu_m_text()})")
     ax.set_title(
-        f"Macro-positioned alpha/Li trajectories by capture location\n"
-        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}, n = {len(trajectories)}"
+        f"Macroscopic Alpha and Li-7 Particle Trajectories\n"
+        f"BN:ZnS = {ratio.display_tag}, t = {thickness_um:g} {mu_m_text()}"
     )
     ax.view_init(elev=24, azim=-54)
     ax.grid(True, alpha=0.16)
@@ -1133,7 +1144,7 @@ def plot_macro_trajectory_showcase_3d(
 
     phases_present = {phase for phase, segments in segments_by_phase.items() if segments}
     handles = [
-        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=phase)
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=3.0, label=PHASE_LABELS.get(phase, phase))
         for phase in PHASE_ORDER
         if phase in phases_present
     ]
@@ -1201,7 +1212,7 @@ def plot_trajectory_projections(
 
     phases_present = {step.phase_pre for traj in trajectories for step in traj.steps}
     handles = [
-        Line2D([0], [0], color=PHASE_COLORS[phase], lw=2.8, label=phase)
+        Line2D([0], [0], color=PHASE_COLORS[phase], lw=2.8, label=PHASE_LABELS.get(phase, phase))
         for phase in PHASE_ORDER
         if phase in phases_present
     ]
@@ -1214,7 +1225,7 @@ def plot_trajectory_projections(
     )
     fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 7), frameon=False, bbox_to_anchor=(0.5, 0.0))
     fig.suptitle(
-        f"Alpha/Li trajectory projections by phase, BN:ZnS = {ratio.display_tag}, "
+        f"Alpha and Li-7 Trajectory Projections, BN:ZnS = {ratio.display_tag}, "
         f"t = {thickness_um:g} {mu_m_text()}",
         y=0.98,
         fontsize=14,
@@ -1291,8 +1302,8 @@ def plot_summary_lines(
         ax.grid(True, which="both", alpha=0.18, linewidth=0.7)
         style_axes(ax)
 
-    axes[0].set_title("Energy deposition along recorded tracks")
-    axes[1].set_title("Recorded track length")
+    axes[0].set_title("Energy deposition")
+    axes[1].set_title("Track length")
     handles, labels = axes[0].get_legend_handles_labels()
     if len(handles) <= 12:
         axes[1].legend(handles, labels, frameon=False, fontsize=8.2, loc="best")
@@ -1304,7 +1315,7 @@ def plot_summary_lines(
         ]
         axes[1].legend(handles=phase_handles, frameon=False, loc="best")
 
-    fig.suptitle("Alpha/Li trajectory statistics from Stage B track steps", y=0.98, fontsize=14)
+    fig.suptitle("Alpha and Li-7 Trajectory Statistics", y=0.98, fontsize=14)
     fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.14, wspace=0.24)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300)
@@ -1412,6 +1423,32 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ratios, entries = discover_track_files(stageb_root, args.ratios, args.thicknesses, args.max_files)
+    if args.only_origin_aligned:
+        showcase_ratio, showcase_thickness, showcase_path, showcase_input_mode = choose_showcase_entry(
+            entries,
+            args.showcase_ratio,
+            args.showcase_thickness,
+        )
+        trajectories = collect_showcase_trajectories(
+            showcase_ratio,
+            showcase_thickness,
+            showcase_path,
+            showcase_input_mode,
+            args.reservoir_size,
+            args.sample_trajectories,
+            args.max_showcase_steps,
+            args.seed,
+        )
+        origin_path = output_dir / "stageD_origin_aligned_trajectory_showcase_3d.png"
+        plot_origin_aligned_trajectory_showcase_3d(
+            trajectories,
+            origin_path,
+            showcase_ratio,
+            showcase_thickness,
+        )
+        print(f"Wrote {origin_path}")
+        return 0
+
     records = collect_summary(entries, args.summary_stride)
 
     summary_fields = [

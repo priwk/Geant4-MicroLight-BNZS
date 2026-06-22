@@ -55,12 +55,12 @@ Main outputs:
 - `stageD_zns_trajectory_summary.csv`
 
 The showcase figures select representative particle trajectories from one track
-file. Full files are plotted with segment color set by `phase_pre`:
+file. Full files are plotted with segment color set by material phase:
 
-- `BN`
-- `ZnS`
-- `binder_void`
-- `outside`
+- BN phase
+- ZnS phase
+- Binder/porosity phase
+- Outside domain
 
 Alpha and Li7 are separated by line width. By default, the showcase uses the
 largest processed thickness for the first processed ratio. You can select a
@@ -88,15 +88,30 @@ macro_z = depth_um     + (local_z - local_capture_z_um)
 
 `stageD_origin_aligned_trajectory_showcase_3d.png` is a display-only transform:
 each selected particle trajectory is translated so its first recorded point is
-at `(0, 0, 0)`. This does not modify the source CSV. The plot keeps phase colors
-and alpha/Li line-width encoding, and uses equal 3D axes with heavier axis lines
-so the approximate travel distance is visible at a glance.
+at `(0, 0, 0)`. This does not modify the source CSV. Alpha and Li7 trajectories
+are shown as separate 3D panels, with phase colors preserved and equal axes so
+the approximate travel distance is visible at a glance.
 
 For the cloud server case where all six ratios have `1000_alpha_li_steps.csv`,
 run only the 1000 um files:
 
 ```bash
 python3 plots/stageD_zns_trajectories/generate_stageD_zns_trajectories.py \
+  --thicknesses 1000 \
+  --showcase-ratio 1-2 \
+  --showcase-thickness 1000 \
+  --sample-trajectories 160 \
+  --reservoir-size 2000 \
+  --max-showcase-steps 1000000
+```
+
+To regenerate only `stageD_origin_aligned_trajectory_showcase_3d.png`, skip
+the summary and other figures:
+
+```bash
+python3 plots/stageD_zns_trajectories/generate_stageD_zns_trajectories.py \
+  --only-origin-aligned \
+  --ratios 1-2 \
   --thicknesses 1000 \
   --showcase-ratio 1-2 \
   --showcase-thickness 1000 \
@@ -121,3 +136,4 @@ Useful options:
   projection figures.
 - `--reservoir-size`: candidate pool for the showcase trajectory sampler.
 - `--max-showcase-steps`: maximum row count scanned for the showcase sampler.
+- `--only-origin-aligned`: regenerate only the origin-aligned 3D showcase image.
